@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build outputs
+.next/
+**/.next/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Deployment archives
+*.zip
+*.tar
+*.tar.gz
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Codex/local agent metadata
+.agents/
+.codex/
+
+# Arduino temporary folders
+*.tmp
+*.bak

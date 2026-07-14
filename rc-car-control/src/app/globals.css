@@ -1,0 +1,208 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f5f1ea;
+  --foreground: #102033;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: "Segoe UI", Arial, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, monospace;
+}
+
+html {
+  min-height: 100%;
+  background: var(--background);
+}
+
+body {
+  background:
+    radial-gradient(circle at 12% 12%, rgba(13, 148, 136, 0.24), transparent 28%),
+    radial-gradient(circle at 88% 14%, rgba(245, 158, 11, 0.20), transparent 24%),
+    radial-gradient(circle at 50% 108%, rgba(15, 23, 42, 0.16), transparent 40%),
+    linear-gradient(180deg, #fbfaf7 0%, #f4efe6 48%, #ecf2f3 100%);
+  color: var(--foreground);
+  font-family: "Segoe UI", Arial, sans-serif;
+  color-scheme: light;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(16, 32, 51, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(16, 32, 51, 0.03) 1px, transparent 1px);
+  background-size: 72px 72px;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.75), transparent 92%);
+}
+
+.glass-surface {
+  border: 1px solid rgba(255, 255, 255, 0.52);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.66));
+  backdrop-filter: blur(20px) saturate(160%);
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.09);
+}
+
+.glass-surface-strong {
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.72));
+  backdrop-filter: blur(24px) saturate(180%);
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.12);
+}
+
+.glass-chip {
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.64);
+  backdrop-filter: blur(12px) saturate(150%);
+}
+
+.glass-modal {
+  border: 1px solid rgba(255, 255, 255, 0.64);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(250, 249, 245, 0.76));
+  backdrop-filter: blur(26px) saturate(170%);
+  box-shadow: 0 28px 70px rgba(15, 23, 42, 0.18);
+}
+
+@media (min-width: 1024px) {
+  .desktop-glass-surface {
+    border-color: rgba(255, 255, 255, 0.34);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.42));
+    backdrop-filter: blur(24px) saturate(170%);
+    box-shadow: 0 16px 34px rgba(15, 23, 42, 0.06);
+  }
+
+  .desktop-glass-surface-strong {
+    border-color: rgba(255, 255, 255, 0.42);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.74), rgba(255, 255, 255, 0.52));
+    backdrop-filter: blur(26px) saturate(175%);
+    box-shadow: 0 20px 46px rgba(15, 23, 42, 0.08);
+  }
+
+  .desktop-glass-chip {
+    border-color: rgba(255, 255, 255, 0.28);
+    background: rgba(255, 255, 255, 0.42);
+    backdrop-filter: blur(14px) saturate(155%);
+  }
+}
+
+.mobile-controller {
+  position: relative;
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
+  background: #020617;
+  touch-action: none;
+}
+
+.video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.drive-joystick {
+  position: absolute;
+  bottom: max(18px, env(safe-area-inset-bottom));
+  left: max(16px, env(safe-area-inset-left));
+  z-index: 20;
+  touch-action: none;
+}
+
+.camera-joystick {
+  position: absolute;
+  bottom: max(18px, env(safe-area-inset-bottom));
+  right: max(16px, env(safe-area-inset-right));
+  z-index: 20;
+  touch-action: none;
+}
+
+.action-bar {
+  position: absolute;
+  bottom: max(20px, env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+}
+
+.status-bar {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  left: max(10px, env(safe-area-inset-left));
+  right: max(10px, env(safe-area-inset-right));
+  z-index: 30;
+}
+
+.portrait-controller .status-bar {
+  align-items: flex-start;
+  border-radius: 1rem;
+}
+
+.portrait-controller .drive-joystick {
+  bottom: max(18px, env(safe-area-inset-bottom));
+  left: max(12px, env(safe-area-inset-left));
+}
+
+.portrait-controller .camera-joystick {
+  bottom: max(18px, env(safe-area-inset-bottom));
+  right: max(78px, env(safe-area-inset-right));
+}
+
+.portrait-controller .action-bar {
+  left: auto;
+  right: max(10px, env(safe-area-inset-right));
+  bottom: max(18px, env(safe-area-inset-bottom));
+  transform: none;
+  max-width: 4.25rem;
+}
+
+@media (max-height: 620px) {
+  .landscape-controller .status-bar {
+    left: 50%;
+    right: auto;
+    width: min(760px, calc(100% - 1rem));
+    transform: translateX(-50%);
+  }
+
+  .landscape-controller .action-bar {
+    bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
+  .landscape-controller .drive-joystick,
+  .landscape-controller .camera-joystick {
+    bottom: max(12px, env(safe-area-inset-bottom));
+  }
+}
+
+@media (min-width: 1024px) {
+  .desktop-controller .status-bar {
+    top: 16px;
+    left: 50%;
+    right: auto;
+    width: min(1120px, calc(100% - 2rem));
+    transform: translateX(-50%);
+  }
+
+  .desktop-controller .action-bar {
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+  }
+
+  .desktop-controller .drive-joystick {
+    left: clamp(1.25rem, 4vw, 3rem);
+    bottom: clamp(1.25rem, 3.5vh, 2.25rem);
+  }
+
+  .desktop-controller .camera-joystick {
+    right: clamp(1.25rem, 4vw, 3rem);
+    bottom: clamp(1.25rem, 3.5vh, 2.25rem);
+  }
+}

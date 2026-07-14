@@ -1,0 +1,14 @@
+{
+  "name": "rc-car-cloud-server",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "test": "node --test test/**/*.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
