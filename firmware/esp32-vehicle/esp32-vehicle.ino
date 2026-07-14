@@ -4,12 +4,10 @@
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
-#include <WiFiManager.h>
 #include <WebSocketsClient.h>
 #include <math.h>
 
 // Required libraries:
-// - WiFiManager by tzapu
 // - ArduinoJson by Benoit Blanchon
 // - WebSockets by Markus Sattler
 // - ESP32Servo by Kevin Harrington / John K. Bennett
@@ -41,6 +39,8 @@ static const int SERVO_MIN_US = 500;
 static const int SERVO_MAX_US = 2400;
 
 struct VehicleConfig {
+  char wifiSsid[64] = "";
+  char wifiPass[96] = "";
   char wsHost[96] = "192.168.1.10";
   char wsPort[8] = "8080";
   char wsPath[32] = "/";
@@ -84,6 +84,11 @@ unsigned long lastStatusAt = 0;
 unsigned long lastCommandAt = 0;
 unsigned long buzzerOffAt = 0;
 unsigned long lastWsDisconnectedLogAt = 0;
+bool setupSaveRequested = false;
+bool setupProvisionReady = false;
+bool setupConnectDone = false;
+bool setupConnectOk = false;
+unsigned long setupSavedAt = 0;
 
 void sendDeviceLog(const char *level, const String &message);
 
@@ -108,6 +113,8 @@ int clampInt(int value, int minValue, int maxValue) {
 
 void loadConfig() {
   prefs.begin("fpv-car", true);
+  prefs.getString("wifiSsid", config.wifiSsid, sizeof(config.wifiSsid));
+  prefs.getString("wifiPass", config.wifiPass, sizeof(config.wifiPass));
   prefs.getString("wsHost", config.wsHost, sizeof(config.wsHost));
   prefs.getString("wsPort", config.wsPort, sizeof(config.wsPort));
   prefs.getString("wsPath", config.wsPath, sizeof(config.wsPath));
@@ -120,6 +127,8 @@ void loadConfig() {
 
 void saveConfig() {
   prefs.begin("fpv-car", false);
+  prefs.putString("wifiSsid", config.wifiSsid);
+  prefs.putString("wifiPass", config.wifiPass);
   prefs.putString("wsHost", config.wsHost);
   prefs.putString("wsPort", config.wsPort);
   prefs.putString("wsPath", config.wsPath);
@@ -416,6 +425,9 @@ void changeWiFiFromPayload(JsonObject payload) {
     return;
   }
 
+  strlcpy(config.wifiSsid, ssid.c_str(), sizeof(config.wifiSsid));
+  strlcpy(config.wifiPass, password.c_str(), sizeof(config.wifiPass));
+  saveConfig();
   sendStatus("WIFI_SET received: switching vehicle WiFi");
   stopDrive();
   delay(150);
@@ -473,9 +485,14 @@ void handleAction(JsonDocument &doc) {
   } else if (strcmp(action, "WIFI_SET") == 0) {
     changeWiFiFromPayload(payload);
   } else if (strcmp(action, "WIFI_PORTAL_OPEN") == 0) {
-    Serial.println("Opening WiFi config portal");
-    WiFiManager wm;
-    wm.startConfigPortal(deviceName().c_str(), "12345678");
+    Serial.println("Opening WiFi setup portal after restart");
+    prefs.begin("fpv-car", false);
+    prefs.remove("wifiSsid");
+    prefs.remove("wifiPass");
+    prefs.end();
+    ackCommand(commandId, "restarting into WiFi setup portal");
+    delay(150);
+    ESP.restart();
   }
 
   if (strncmp(action, "CAM", 3) == 0) {
@@ -571,54 +588,200 @@ void setupPortalRedirect() {
   portalServer.on("/reset-wifi", []() {
     portalServer.send(200, "text/plain", "WiFi settings cleared. Rebooting...");
     delay(300);
-    WiFiManager wm;
-    wm.resetSettings();
+    prefs.begin("fpv-car", false);
+    prefs.remove("wifiSsid");
+    prefs.remove("wifiPass");
+    prefs.end();
+    WiFi.disconnect(true, true);
     ESP.restart();
   });
 
   portalServer.begin();
 }
 
-void setupWiFiManager() {
-  WiFiManager wm;
+bool connectToConfiguredWiFi(unsigned long timeoutMs, bool keepSetupAp) {
+  if (strlen(config.wifiSsid) == 0) return false;
 
-  WiFiManagerParameter pWsScheme("ws_scheme", "ws or wss", config.wsScheme, sizeof(config.wsScheme));
-  WiFiManagerParameter pWsHost("ws_host", "Cloud WebSocket host", config.wsHost, sizeof(config.wsHost));
-  WiFiManagerParameter pWsPort("ws_port", "Cloud WebSocket port", config.wsPort, sizeof(config.wsPort));
-  WiFiManagerParameter pWsPath("ws_path", "Cloud WebSocket path", config.wsPath, sizeof(config.wsPath));
-  WiFiManagerParameter pVehicleId("vehicle_id", "Vehicle ID", config.vehicleId, sizeof(config.vehicleId));
-  WiFiManagerParameter pAuthToken("auth_token", "Vehicle auth token", config.authToken, sizeof(config.authToken));
-  WiFiManagerParameter pControlUrl("control_url", "Controller page URL", config.controlUrl, sizeof(config.controlUrl));
+  WiFi.mode(keepSetupAp ? WIFI_AP_STA : WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(config.wifiSsid, config.wifiPass);
 
-  wm.addParameter(&pWsScheme);
-  wm.addParameter(&pWsHost);
-  wm.addParameter(&pWsPort);
-  wm.addParameter(&pWsPath);
-  wm.addParameter(&pVehicleId);
-  wm.addParameter(&pAuthToken);
-  wm.addParameter(&pControlUrl);
-  wm.setConfigPortalTimeout(240);
-  wm.setConnectTimeout(25);
-  wm.setBreakAfterConfig(true);
+  Serial.print("Connecting WiFi: ");
+  Serial.println(config.wifiSsid);
 
-  bool connected = wm.autoConnect(deviceName().c_str(), "12345678");
+  unsigned long startedAt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < timeoutMs) {
+    portalServer.handleClient();
+    delay(100);
+    Serial.print(".");
+  }
+  Serial.println();
 
-  strlcpy(config.wsScheme, pWsScheme.getValue(), sizeof(config.wsScheme));
-  strlcpy(config.wsHost, pWsHost.getValue(), sizeof(config.wsHost));
-  strlcpy(config.wsPort, pWsPort.getValue(), sizeof(config.wsPort));
-  strlcpy(config.wsPath, pWsPath.getValue(), sizeof(config.wsPath));
-  strlcpy(config.vehicleId, pVehicleId.getValue(), sizeof(config.vehicleId));
-  strlcpy(config.authToken, pAuthToken.getValue(), sizeof(config.authToken));
-  strlcpy(config.controlUrl, pControlUrl.getValue(), sizeof(config.controlUrl));
-  saveConfig();
-
-  if (!connected) {
-    Serial.println("WiFiManager failed or timed out. Restarting...");
-    ESP.restart();
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi connect failed.");
+    return false;
   }
 
   Serial.print("WiFi connected: ");
-  Serial.println(WiFi.SSID());
+  Serial.print(WiFi.SSID());
+  Serial.print(" IP=");
+  Serial.println(WiFi.localIP());
+  return true;
+}
+
+String htmlEscape(const char *value) {
+  String escaped = value;
+  escaped.replace("&", "&amp;");
+  escaped.replace("\"", "&quot;");
+  escaped.replace("<", "&lt;");
+  escaped.replace(">", "&gt;");
+  return escaped;
+}
+
+String wifiOptionsHtml() {
+  String html;
+  int networkCount = WiFi.scanNetworks();
+  for (int i = 0; i < networkCount; i++) {
+    String ssid = WiFi.SSID(i);
+    html += "<option value=\"" + htmlEscape(ssid.c_str()) + "\">";
+    html += htmlEscape(ssid.c_str());
+    html += " (" + String(WiFi.RSSI(i)) + " dBm)</option>";
+  }
+  WiFi.scanDelete();
+  return html;
+}
+
+void sendSetupPage() {
+  String html;
+  html += "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<title>FPV Car Setup</title><style>";
+  html += "body{font-family:system-ui;margin:0;background:#0b1020;color:#eef2ff}main{max-width:720px;margin:auto;padding:24px}";
+  html += "label{display:block;margin:14px 0 6px;color:#b7c4d8}input,select{width:100%;box-sizing:border-box;padding:12px;border-radius:8px;border:1px solid #334155;background:#101827;color:#fff}";
+  html += "button{margin-top:18px;padding:13px 18px;border:0;border-radius:8px;background:#38bdf8;color:#00111f;font-weight:700}";
+  html += ".grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.card{border:1px solid #263449;border-radius:12px;padding:16px;background:#111827}";
+  html += "@media(max-width:640px){.grid{grid-template-columns:1fr}}</style></head><body><main>";
+  html += "<h1>FPV Car Setup</h1><p>Set Wi-Fi once. The vehicle will share it with ESP32-CAM automatically.</p>";
+  html += "<form method='post' action='/save'><div class='card'>";
+  html += "<label>Choose Wi-Fi / Hotspot</label><select name='ssid_select'><option value=''>Manual SSID</option>";
+  html += wifiOptionsHtml();
+  html += "</select><label>Manual SSID</label><input name='ssid' value='";
+  html += htmlEscape(config.wifiSsid);
+  html += "'><label>Password</label><input name='password' type='password' value='";
+  html += htmlEscape(config.wifiPass);
+  html += "'></div><div class='card' style='margin-top:14px'><div class='grid'>";
+  html += "<div><label>WebSocket scheme</label><select name='ws_scheme'><option value='ws'>ws</option><option value='wss'";
+  html += strcmp(config.wsScheme, "wss") == 0 ? " selected" : "";
+  html += ">wss</option></select></div>";
+  html += "<div><label>WebSocket host</label><input name='ws_host' value='" + htmlEscape(config.wsHost) + "'></div>";
+  html += "<div><label>WebSocket port</label><input name='ws_port' value='" + htmlEscape(config.wsPort) + "'></div>";
+  html += "<div><label>WebSocket path</label><input name='ws_path' value='" + htmlEscape(config.wsPath) + "'></div>";
+  html += "<div><label>Vehicle ID</label><input name='vehicle_id' value='" + htmlEscape(config.vehicleId) + "'></div>";
+  html += "<div><label>Vehicle auth token</label><input name='auth_token' value='" + htmlEscape(config.authToken) + "'></div>";
+  html += "</div><label>Controller URL</label><input name='control_url' value='" + htmlEscape(config.controlUrl) + "'></div>";
+  html += "<button type='submit'>Save and connect both boards</button></form></main></body></html>";
+  portalServer.send(200, "text/html", html);
+}
+
+void sendCamProvision() {
+  JsonDocument doc;
+  doc["ready"] = setupProvisionReady;
+  if (setupProvisionReady) {
+    doc["ssid"] = config.wifiSsid;
+    doc["password"] = config.wifiPass;
+    doc["wsScheme"] = config.wsScheme;
+    doc["wsHost"] = config.wsHost;
+    doc["wsPort"] = config.wsPort;
+    doc["wsPath"] = config.wsPath;
+    doc["vehicleId"] = config.vehicleId;
+    doc["authToken"] = config.authToken;
+    doc["controlUrl"] = config.controlUrl;
+  }
+
+  String body;
+  serializeJson(doc, body);
+  portalServer.send(200, "application/json", body);
+}
+
+void handleSetupSave() {
+  String selectedSsid = portalServer.arg("ssid_select");
+  String manualSsid = portalServer.arg("ssid");
+  String ssid = selectedSsid.length() > 0 ? selectedSsid : manualSsid;
+
+  if (ssid.length() == 0) {
+    portalServer.send(400, "text/plain", "SSID is required. Go back and choose Wi-Fi.");
+    return;
+  }
+
+  strlcpy(config.wifiSsid, ssid.c_str(), sizeof(config.wifiSsid));
+  strlcpy(config.wifiPass, portalServer.arg("password").c_str(), sizeof(config.wifiPass));
+  strlcpy(config.wsScheme, portalServer.arg("ws_scheme").c_str(), sizeof(config.wsScheme));
+  strlcpy(config.wsHost, portalServer.arg("ws_host").c_str(), sizeof(config.wsHost));
+  strlcpy(config.wsPort, portalServer.arg("ws_port").c_str(), sizeof(config.wsPort));
+  strlcpy(config.wsPath, portalServer.arg("ws_path").c_str(), sizeof(config.wsPath));
+  strlcpy(config.vehicleId, portalServer.arg("vehicle_id").c_str(), sizeof(config.vehicleId));
+  strlcpy(config.authToken, portalServer.arg("auth_token").c_str(), sizeof(config.authToken));
+  strlcpy(config.controlUrl, portalServer.arg("control_url").c_str(), sizeof(config.controlUrl));
+  saveConfig();
+
+  setupSaveRequested = true;
+  setupProvisionReady = true;
+  Serial.println("Setup saved. Provision payload is ready for ESP32-CAM.");
+
+  portalServer.send(200, "text/html",
+                    "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    "<body style='font-family:system-ui;background:#0b1020;color:#eef2ff;padding:24px'>"
+                    "<h1>Saved</h1><p>Keep ESP32-CAM powered on. The vehicle is connecting and sharing Wi-Fi now.</p>"
+                    "<p>You can close this page after both boards reboot/connect.</p></body>");
+}
+
+void startSetupPortal() {
+  setupSaveRequested = false;
+  setupProvisionReady = false;
+  setupConnectDone = false;
+  setupConnectOk = false;
+  setupSavedAt = 0;
+
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP("FPV-Car-Setup", "12345678");
+  Serial.print("Setup AP started: FPV-Car-Setup IP=");
+  Serial.println(WiFi.softAPIP());
+
+  portalServer.stop();
+  portalServer.on("/", HTTP_GET, sendSetupPage);
+  portalServer.on("/save", HTTP_POST, handleSetupSave);
+  portalServer.on("/api/cam-provision", HTTP_GET, sendCamProvision);
+  portalServer.begin();
+
+  Serial.println("Open http://192.168.4.1 to configure Wi-Fi for both boards.");
+  while (true) {
+    portalServer.handleClient();
+
+    if (setupSaveRequested && !setupConnectDone) {
+      setupConnectOk = connectToConfiguredWiFi(25000, true);
+      setupConnectDone = true;
+      setupSavedAt = millis();
+      Serial.println(setupConnectOk ? "Vehicle WiFi connected. Waiting for CAM to fetch provision." :
+                                      "Vehicle WiFi failed. CAM can still fetch the saved provision.");
+    }
+
+    if (setupConnectDone && millis() - setupSavedAt > 10000) break;
+    delay(10);
+  }
+
+  portalServer.stop();
+  WiFi.softAPdisconnect(true);
+
+  if (!setupConnectOk) {
+    Serial.println("Setup WiFi failed. Restarting setup portal.");
+    delay(1000);
+    ESP.restart();
+  }
+}
+
+void setupWiFiManager() {
+  if (connectToConfiguredWiFi(18000, false)) return;
+  Serial.println("Saved WiFi unavailable. Starting one-time setup portal.");
+  startSetupPortal();
 }
 
 void setupWebSocket() {

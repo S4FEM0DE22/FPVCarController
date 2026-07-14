@@ -9,20 +9,43 @@ This folder contains Arduino sketches for the project hardware:
 
 Install these from Arduino IDE Library Manager:
 
-- WiFiManager by tzapu
 - ArduinoJson by Benoit Blanchon
 - WebSockets by Markus Sattler
 - ESP32Servo by Kevin Harrington / John K. Bennett
 
 Also install the ESP32 board package in Arduino IDE.
 
+## First-Time Shared Wi-Fi Setup
+
+Use this flow when the ESP32 vehicle and ESP32-CAM have no saved Wi-Fi yet:
+
+1. Flash both sketches.
+2. Power on the ESP32 vehicle and ESP32-CAM at the same time.
+3. Connect your phone, tablet, or computer to:
+   - SSID: `FPV-Car-Setup`
+   - Password: `12345678`
+4. Open:
+
+```text
+http://192.168.4.1
+```
+
+5. Choose your Wi-Fi/hotspot, enter the password once, and fill in the controller/cloud settings.
+6. Press `Save and connect both boards`.
+
+After saving:
+
+- The ESP32 vehicle saves the Wi-Fi and connects to it.
+- The ESP32 vehicle keeps the setup AP open briefly and exposes `/api/cam-provision`.
+- The ESP32-CAM joins `FPV-Car-Setup`, fetches the same Wi-Fi/controller/cloud settings, saves them to Preferences, then connects to the same Wi-Fi.
+
+On later boots, both boards connect to the saved Wi-Fi automatically. You do not need to open the setup page again unless you change Wi-Fi or clear settings.
+
 ## ESP32 Vehicle Setup
 
 1. Open `esp32-vehicle/esp32-vehicle.ino`.
 2. Select an ESP32 board, then flash it.
-3. On first boot, connect your phone/laptop to the setup Wi-Fi:
-   - SSID: `FPV-Car-xxxxxx`
-   - Password: `12345678`
+3. On first boot, use the shared setup page above.
 4. Fill in:
    - `ws_scheme`: `ws` for local server or `wss` for deployed HTTPS server
    - `ws_host`: cloud/server host, for example `192.168.1.10`
@@ -39,17 +62,8 @@ Default TB6612FNG pins are declared at the top of the sketch. Change them to mat
 
 1. Open `esp32-cam/esp32-cam.ino`.
 2. Select `AI Thinker ESP32-CAM`, then flash it.
-3. On first boot, connect to:
-   - SSID: `FPV-CAM-xxxxxx`
-   - Password: `12345678`
-4. Fill in `control_url`, for example `http://192.168.1.10:3000/controller`.
-   For cloud streaming, also fill in:
-   - `ws_scheme`: `wss` for Azure/App Service HTTPS
-   - `ws_host`: relay host, for example `<relay-app>.azurewebsites.net`
-   - `ws_port`: `443` for `wss`
-   - `ws_path`: `/`
-   - `vehicle_id`: must match the vehicle and web app, default `car-001`
-   - `auth_token`: optional, must match `VEHICLE_AUTH_TOKEN` on the relay if enabled
+3. Power it on together with the ESP32 vehicle during first-time setup.
+4. The ESP32-CAM does not open its own setup portal. It waits for the ESP32 vehicle setup AP, fetches the provision data, saves it, and joins the same Wi-Fi.
 5. After saving Wi-Fi, open the camera IP. It redirects to:
 
 ```text
@@ -60,16 +74,11 @@ The web app stores this camera URL in `localStorage`, so it keeps working after 
 
 ## Shared Wi-Fi From The Web App
 
-Because the ESP32 vehicle and ESP32-CAM are two separate boards, the first setup still needs each board to join a Wi-Fi network at least once:
-
-1. Configure `FPV-Car-xxxxxx`.
-2. Configure `FPV-CAM-xxxxxx`.
-3. Open the ESP32-CAM IP once so it redirects to the controller with `?cam=http://<camera-ip>/stream`.
-
-After that, the controller page can change Wi-Fi for both boards from one form:
+The controller page can change Wi-Fi for both boards from one form:
 
 - ESP32 vehicle receives `WIFI_SET` through the existing WebSocket `action` channel.
 - ESP32-CAM receives the same SSID/password through `POST http://<camera-ip>/api/wifi`.
+- Both boards save the new Wi-Fi to Preferences, so the next boot uses the new network automatically.
 
 This works best when the web controller, ESP32, and ESP32-CAM are reachable on the same LAN. If the controller is served over HTTPS, browsers may block calls to an `http://` ESP32-CAM address as mixed content; for local demos, use the controller over `http://<computer-lan-ip>:3000/controller`.
 

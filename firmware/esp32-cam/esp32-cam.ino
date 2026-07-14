@@ -2,14 +2,13 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <HTTPClient.h>
 #include <WebServer.h>
 #include <WiFi.h>
-#include <WiFiManager.h>
 #include <WebSocketsClient.h>
 #include <mbedtls/base64.h>
 
 // Required library:
-// - WiFiManager by tzapu
 // - ArduinoJson by Benoit Blanchon
 // Board target:
 // - AI Thinker ESP32-CAM
@@ -33,6 +32,8 @@
 #define FLASH_LED_PIN 4
 
 struct CamConfig {
+  char wifiSsid[64] = "";
+  char wifiPass[96] = "";
   char controlUrl[160] = "http://localhost:3000/controller";
   char cameraName[48] = "FPV ESP32-CAM";
   char wsHost[96] = "192.168.1.10";
@@ -111,6 +112,8 @@ String deviceName() {
 
 void loadConfig() {
   prefs.begin("fpv-cam", true);
+  prefs.getString("wifiSsid", config.wifiSsid, sizeof(config.wifiSsid));
+  prefs.getString("wifiPass", config.wifiPass, sizeof(config.wifiPass));
   prefs.getString("controlUrl", config.controlUrl, sizeof(config.controlUrl));
   prefs.getString("cameraName", config.cameraName, sizeof(config.cameraName));
   prefs.getString("wsHost", config.wsHost, sizeof(config.wsHost));
@@ -124,6 +127,8 @@ void loadConfig() {
 
 void saveConfig() {
   prefs.begin("fpv-cam", false);
+  prefs.putString("wifiSsid", config.wifiSsid);
+  prefs.putString("wifiPass", config.wifiPass);
   prefs.putString("controlUrl", config.controlUrl);
   prefs.putString("cameraName", config.cameraName);
   prefs.putString("wsHost", config.wsHost);
@@ -256,8 +261,10 @@ void handleWifiSet() {
 
   if (controlUrl.length() > 0) {
     strlcpy(config.controlUrl, controlUrl.c_str(), sizeof(config.controlUrl));
-    saveConfig();
   }
+  strlcpy(config.wifiSsid, ssid.c_str(), sizeof(config.wifiSsid));
+  strlcpy(config.wifiPass, password.c_str(), sizeof(config.wifiPass));
+  saveConfig();
 
   Serial.print("WiFi update requested: ssid=");
   Serial.print(ssid);
@@ -510,8 +517,11 @@ void setupRoutes() {
     Serial.println("Reset WiFi requested. Rebooting...");
     server.send(200, "text/plain", "WiFi settings cleared. Rebooting...");
     delay(300);
-    WiFiManager wm;
-    wm.resetSettings();
+    prefs.begin("fpv-cam", false);
+    prefs.remove("wifiSsid");
+    prefs.remove("wifiPass");
+    prefs.end();
+    WiFi.disconnect(true, true);
     ESP.restart();
   });
 
@@ -519,49 +529,122 @@ void setupRoutes() {
   Serial.println("Camera HTTP server started on port 80");
 }
 
-void setupWiFiManager() {
-  WiFiManager wm;
-  WiFiManagerParameter pControlUrl("control_url", "Controller page URL", config.controlUrl, sizeof(config.controlUrl));
-  WiFiManagerParameter pCameraName("camera_name", "Camera display name", config.cameraName, sizeof(config.cameraName));
-  WiFiManagerParameter pWsScheme("ws_scheme", "ws or wss", config.wsScheme, sizeof(config.wsScheme));
-  WiFiManagerParameter pWsHost("ws_host", "Cloud WebSocket host", config.wsHost, sizeof(config.wsHost));
-  WiFiManagerParameter pWsPort("ws_port", "Cloud WebSocket port", config.wsPort, sizeof(config.wsPort));
-  WiFiManagerParameter pWsPath("ws_path", "Cloud WebSocket path", config.wsPath, sizeof(config.wsPath));
-  WiFiManagerParameter pVehicleId("vehicle_id", "Vehicle ID", config.vehicleId, sizeof(config.vehicleId));
-  WiFiManagerParameter pAuthToken("auth_token", "Vehicle auth token", config.authToken, sizeof(config.authToken));
+bool connectToConfiguredWiFi(unsigned long timeoutMs) {
+  if (strlen(config.wifiSsid) == 0) return false;
 
-  wm.addParameter(&pControlUrl);
-  wm.addParameter(&pCameraName);
-  wm.addParameter(&pWsScheme);
-  wm.addParameter(&pWsHost);
-  wm.addParameter(&pWsPort);
-  wm.addParameter(&pWsPath);
-  wm.addParameter(&pVehicleId);
-  wm.addParameter(&pAuthToken);
-  wm.setConfigPortalTimeout(240);
-  wm.setConnectTimeout(25);
-  wm.setBreakAfterConfig(true);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(config.wifiSsid, config.wifiPass);
 
-  bool connected = wm.autoConnect(deviceName().c_str(), "12345678");
+  Serial.print("Connecting WiFi: ");
+  Serial.println(config.wifiSsid);
 
-  strlcpy(config.controlUrl, pControlUrl.getValue(), sizeof(config.controlUrl));
-  strlcpy(config.cameraName, pCameraName.getValue(), sizeof(config.cameraName));
-  strlcpy(config.wsScheme, pWsScheme.getValue(), sizeof(config.wsScheme));
-  strlcpy(config.wsHost, pWsHost.getValue(), sizeof(config.wsHost));
-  strlcpy(config.wsPort, pWsPort.getValue(), sizeof(config.wsPort));
-  strlcpy(config.wsPath, pWsPath.getValue(), sizeof(config.wsPath));
-  strlcpy(config.vehicleId, pVehicleId.getValue(), sizeof(config.vehicleId));
-  strlcpy(config.authToken, pAuthToken.getValue(), sizeof(config.authToken));
+  unsigned long startedAt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < timeoutMs) {
+    delay(100);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi connect failed.");
+    return false;
+  }
+
+  Serial.print("WiFi connected: ");
+  Serial.print(WiFi.SSID());
+  Serial.print(" IP=");
+  Serial.println(WiFi.localIP());
+  return true;
+}
+
+bool applyProvisionPayload(const String &body) {
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, body);
+  if (error) {
+    Serial.print("Provision JSON parse error: ");
+    Serial.println(error.c_str());
+    return false;
+  }
+
+  if (!(doc["ready"] | false)) return false;
+
+  const char *ssid = doc["ssid"] | "";
+  if (strlen(ssid) == 0) return false;
+
+  strlcpy(config.wifiSsid, ssid, sizeof(config.wifiSsid));
+  strlcpy(config.wifiPass, doc["password"] | "", sizeof(config.wifiPass));
+  strlcpy(config.wsScheme, doc["wsScheme"] | config.wsScheme, sizeof(config.wsScheme));
+  strlcpy(config.wsHost, doc["wsHost"] | config.wsHost, sizeof(config.wsHost));
+  strlcpy(config.wsPort, doc["wsPort"] | config.wsPort, sizeof(config.wsPort));
+  strlcpy(config.wsPath, doc["wsPath"] | config.wsPath, sizeof(config.wsPath));
+  strlcpy(config.vehicleId, doc["vehicleId"] | config.vehicleId, sizeof(config.vehicleId));
+  strlcpy(config.authToken, doc["authToken"] | config.authToken, sizeof(config.authToken));
+  strlcpy(config.controlUrl, doc["controlUrl"] | config.controlUrl, sizeof(config.controlUrl));
   saveConfig();
 
-  if (!connected) {
-    Serial.println("WiFiManager failed or timed out. Restarting...");
+  Serial.println("Provision saved from ESP32 vehicle.");
+  return true;
+}
+
+bool fetchProvisionFromVehicle() {
+  HTTPClient http;
+  http.begin("http://192.168.4.1/api/cam-provision");
+  int status = http.GET();
+  if (status != 200) {
+    http.end();
+    return false;
+  }
+
+  String body = http.getString();
+  http.end();
+  return applyProvisionPayload(body);
+}
+
+bool waitForVehicleProvision() {
+  Serial.println("Connecting to setup AP: FPV-Car-Setup");
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin("FPV-Car-Setup", "12345678");
+
+  unsigned long apStartedAt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - apStartedAt < 30000) {
+    delay(250);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Could not join FPV-Car-Setup.");
+    return false;
+  }
+
+  Serial.println("Joined FPV-Car-Setup. Waiting for vehicle provision...");
+  unsigned long provisionStartedAt = millis();
+  while (millis() - provisionStartedAt < 240000) {
+    if (fetchProvisionFromVehicle()) return true;
+    delay(1000);
+  }
+
+  Serial.println("Provision wait timed out.");
+  return false;
+}
+
+void setupWiFiManager() {
+  if (connectToConfiguredWiFi(18000)) return;
+
+  Serial.println("Saved WiFi unavailable. Waiting for ESP32 vehicle setup.");
+  if (!waitForVehicleProvision()) {
+    Serial.println("Provision failed. Restarting...");
+    delay(1000);
     ESP.restart();
   }
 
-  WiFi.setSleep(false);
-  Serial.print("WiFi connected: ");
-  Serial.println(WiFi.SSID());
+  if (!connectToConfiguredWiFi(25000)) {
+    Serial.println("Provisioned WiFi failed. Restarting...");
+    delay(1000);
+    ESP.restart();
+  }
 }
 
 void setup() {
