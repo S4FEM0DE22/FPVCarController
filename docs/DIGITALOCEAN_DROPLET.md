@@ -72,8 +72,8 @@ Create relay environment:
 cat >/opt/FPVCarController/server/.env <<'EOF'
 PORT=8080
 ALLOW_LOCALHOST_AUTH_BYPASS=false
-VEHICLE_AUTH_TOKEN=fpv-veh-Noppanun-2026-secure
-CONTROLLER_AUTH_TOKEN=fpv-web-Noppanun-2026-secure
+VEHICLE_AUTH_TOKEN=<replace-with-a-long-random-vehicle-token>
+CONTROLLER_AUTH_TOKEN=<replace-with-a-long-random-controller-token>
 RATE_LIMIT_MAX_MESSAGES=600
 EOF
 ```
@@ -84,7 +84,7 @@ Create web environment:
 cat >/opt/FPVCarController/rc-car-control/.env.production <<'EOF'
 NEXT_PUBLIC_WS_URL=wss://fpv.example.com/ws
 NEXT_PUBLIC_VEHICLE_ID=car-001
-NEXT_PUBLIC_CONTROLLER_AUTH_TOKEN=fpv-web-Noppanun-2026-secure
+NEXT_PUBLIC_CONTROLLER_AUTH_TOKEN=<same-controller-token>
 EOF
 ```
 
@@ -103,34 +103,11 @@ npm run build
 
 ## 7. Start apps with PM2
 
-Create PM2 config:
+The repository already contains the PM2 config. It loads relay secrets from
+`server/.env` with Node.js `--env-file`:
 
 ```bash
-cat >/opt/FPVCarController/ecosystem.config.cjs <<'EOF'
-module.exports = {
-  apps: [
-    {
-      name: "fpv-relay",
-      cwd: "/opt/FPVCarController/server",
-      script: "index.js",
-      env: {
-        NODE_ENV: "production",
-        PORT: "8080",
-      },
-    },
-    {
-      name: "fpv-web",
-      cwd: "/opt/FPVCarController/rc-car-control",
-      script: "node_modules/next/dist/bin/next",
-      args: "start -p 3000",
-      env: {
-        NODE_ENV: "production",
-        PORT: "3000",
-      },
-    },
-  ],
-};
-EOF
+test -f /opt/FPVCarController/ecosystem.config.cjs
 ```
 
 Start and save:
@@ -206,7 +183,7 @@ ws_host = fpv.example.com
 ws_port = 443
 ws_path = /ws
 vehicle_id = car-001
-auth_token = fpv-veh-Noppanun-2026-secure
+auth_token = <same-vehicle-token>
 control_url = https://fpv.example.com/controller
 ```
 
@@ -220,7 +197,7 @@ ws_host = fpv.example.com
 ws_port = 443
 ws_path = /ws
 vehicle_id = car-001
-auth_token = fpv-veh-Noppanun-2026-secure
+auth_token = <same-vehicle-token>
 ```
 
 ## Useful commands

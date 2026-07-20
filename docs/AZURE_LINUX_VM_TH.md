@@ -120,8 +120,8 @@ cd /opt/FPVCarController
 cat >/opt/FPVCarController/server/.env <<'EOF'
 PORT=8080
 ALLOW_LOCALHOST_AUTH_BYPASS=false
-VEHICLE_AUTH_TOKEN=fpv-veh-Noppanun-2026-secure
-CONTROLLER_AUTH_TOKEN=fpv-web-Noppanun-2026-secure
+VEHICLE_AUTH_TOKEN=<สร้าง-token-สุ่มสำหรับรถ>
+CONTROLLER_AUTH_TOKEN=<สร้าง-token-สุ่มสำหรับเว็บ>
 RATE_LIMIT_MAX_MESSAGES=600
 EOF
 ```
@@ -132,7 +132,7 @@ EOF
 cat >/opt/FPVCarController/rc-car-control/.env.production <<'EOF'
 NEXT_PUBLIC_WS_URL=wss://fpv.example.com/ws
 NEXT_PUBLIC_VEHICLE_ID=car-001
-NEXT_PUBLIC_CONTROLLER_AUTH_TOKEN=fpv-web-Noppanun-2026-secure
+NEXT_PUBLIC_CONTROLLER_AUTH_TOKEN=<token-เดียวกับ-CONTROLLER_AUTH_TOKEN>
 EOF
 ```
 
@@ -155,34 +155,11 @@ npm run build
 
 ## 7. รันแอปด้วย PM2
 
-สร้าง PM2 config:
+โปรเจกต์มี `ecosystem.config.cjs` อยู่แล้ว โดย relay จะอ่านค่าใน
+`server/.env` ผ่าน Node.js `--env-file` ไม่ต้องเขียน token ซ้ำใน PM2 config
 
 ```bash
-cat >/opt/FPVCarController/ecosystem.config.cjs <<'EOF'
-module.exports = {
-  apps: [
-    {
-      name: "fpv-relay",
-      cwd: "/opt/FPVCarController/server",
-      script: "index.js",
-      env: {
-        NODE_ENV: "production",
-        PORT: "8080",
-      },
-    },
-    {
-      name: "fpv-web",
-      cwd: "/opt/FPVCarController/rc-car-control",
-      script: "node_modules/next/dist/bin/next",
-      args: "start -p 3000",
-      env: {
-        NODE_ENV: "production",
-        PORT: "3000",
-      },
-    },
-  ],
-};
-EOF
+test -f /opt/FPVCarController/ecosystem.config.cjs
 ```
 
 เริ่มรัน:
@@ -270,7 +247,7 @@ ws_host = fpv.example.com
 ws_port = 443
 ws_path = /ws
 vehicle_id = car-001
-auth_token = fpv-veh-Noppanun-2026-secure
+auth_token = <token-เดียวกับ-VEHICLE_AUTH_TOKEN>
 control_url = https://fpv.example.com/controller
 ```
 
@@ -284,7 +261,7 @@ ws_host = fpv.example.com
 ws_port = 443
 ws_path = /ws
 vehicle_id = car-001
-auth_token = fpv-veh-Noppanun-2026-secure
+auth_token = <token-เดียวกับ-VEHICLE_AUTH_TOKEN>
 ```
 
 ## 11. คำสั่งดู log

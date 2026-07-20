@@ -44,13 +44,8 @@ export function actionLabel(action: string) {
   }
 }
 
-export function formatAngle(value: number) {
-  const rounded = Math.round(value * 10) / 10;
-  return `${rounded > 0 ? "+" : ""}${rounded.toFixed(1)}°`;
-}
-
-export const CAMERA_PAN_CENTER_DEG = 95;
-export const CAMERA_TILT_CENTER_DEG = 64;
+const CAMERA_PAN_CENTER_DEG = 95;
+const CAMERA_TILT_CENTER_DEG = 64;
 
 function formatAxisOffset(
   value: number,
