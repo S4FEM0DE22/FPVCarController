@@ -51,6 +51,13 @@ const CAMERA_CONTROLLER_MAX_BUFFERED_BYTES = Number(
 const ALLOW_LOCALHOST_AUTH_BYPASS =
   String(process.env.ALLOW_LOCALHOST_AUTH_BYPASS || "true").toLowerCase() !==
   "false";
+const CAMERA_MOTION_ACTIONS = new Set([
+  "CAM_UP",
+  "CAM_DOWN",
+  "CAM_LEFT",
+  "CAM_RIGHT",
+  "CAM_RESET",
+]);
 
 const rateLimitByIp = new Map();
 const controlActionRateLimitByKey = new Map();
@@ -817,6 +824,15 @@ wss.on("connection", (ws, request) => {
         commandId,
       };
 
+      if (CAMERA_MOTION_ACTIONS.has(data.action)) {
+        safeSend(entry.camera, {
+          type: "camera_motion",
+          vehicleId,
+          action: data.action,
+          holdMs: 650,
+          timestamp: Date.now(),
+        });
+      }
       safeSend(entry.esp, forwarded);
       safeSend(ws, {
         type: "ack",

@@ -53,8 +53,10 @@ bool cameraHasPsram = false;
 bool flashOn = false;
 bool wsConnected = false;
 bool cloudFrameInFlight = false;
+bool cloudMotionMode = false;
 unsigned long lastFrameAt = 0;
 unsigned long cloudFrameSentAt = 0;
+unsigned long cloudMotionUntil = 0;
 unsigned long lastStatusAt = 0;
 unsigned long lastCloudFrameErrorLogAt = 0;
 uint32_t cloudFramesSent = 0;
@@ -77,6 +79,7 @@ String controlUrlWithCamera();
 void sendCloudFrame();
 void sendDeviceLog(const char *level, const String &message);
 void tuneCloudJpegQuality();
+void setCloudMotionMode(bool active);
 
 void printCameraConfig() {
   Serial.println();
@@ -399,6 +402,28 @@ void sendCloudFrameErrorLog(const String &message) {
   sendDeviceLog("warn", message);
 }
 
+void setCloudMotionMode(bool active) {
+  if (!cameraHasPsram || !cameraSensor || cloudMotionMode == active) return;
+
+  cloudMotionMode = active;
+  stableCloudFrameCount = 0;
+  cameraSensor->set_framesize(
+    cameraSensor,
+    cloudMotionMode ? FRAMESIZE_CIF : FRAMESIZE_HVGA
+  );
+
+  if (cloudMotionMode && cloudJpegQuality < 18) {
+    cloudJpegQuality = 18;
+    cameraSensor->set_quality(cameraSensor, cloudJpegQuality);
+  }
+
+  Serial.println(
+    cloudMotionMode
+      ? "Camera motion profile: CIF"
+      : "Camera idle profile: HVGA"
+  );
+}
+
 void tuneCloudJpegQuality() {
   if (!cameraHasPsram || !cameraSensor || lastCloudFrameAckMs == 0) return;
 
@@ -413,7 +438,7 @@ void tuneCloudJpegQuality() {
   if (overloaded) {
     stableCloudFrameCount = 0;
     nextQuality = min<uint8_t>(CLOUD_JPEG_QUALITY_MAX, cloudJpegQuality + 2);
-  } else if (stable) {
+  } else if (stable && !cloudMotionMode) {
     stableCloudFrameCount++;
     if (stableCloudFrameCount >= 8 && cloudJpegQuality > CLOUD_JPEG_QUALITY_MIN) {
       stableCloudFrameCount = 0;
@@ -492,13 +517,24 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   if (type == WStype_TEXT) {
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload, length);
-    if (!error && strcmp(doc["type"] | "", "camera_frame_ack") == 0) {
+    if (error) return;
+
+    const char *messageType = doc["type"] | "";
+    if (strcmp(messageType, "camera_frame_ack") == 0) {
       if (cloudFrameInFlight) {
         lastCloudFrameAckMs = millis() - cloudFrameSentAt;
       }
       cloudFrameInFlight = false;
       cloudFrameAcks++;
       tuneCloudJpegQuality();
+      return;
+    }
+
+    if (strcmp(messageType, "camera_motion") == 0) {
+      unsigned long holdMs = doc["holdMs"] | 650;
+      holdMs = constrain(holdMs, 250UL, 2000UL);
+      cloudMotionUntil = millis() + holdMs;
+      setCloudMotionMode(true);
     }
     return;
   }
@@ -711,15 +747,20 @@ void loop() {
   sendCloudFrame();
 
   unsigned long now = millis();
+  if (cloudMotionMode && (long)(now - cloudMotionUntil) >= 0) {
+    setCloudMotionMode(false);
+  }
+
   if (now - lastStatusAt > 3000) {
     lastStatusAt = now;
     if (wsConnected) {
       Serial.printf(
-        "Camera cloud online | sent=%lu ack=%lu timeout=%lu inFlight=%s RTT=%lu ms bytes=%u Q=%u RSSI=%d dBm\n",
+        "Camera cloud online | sent=%lu ack=%lu timeout=%lu inFlight=%s mode=%s RTT=%lu ms bytes=%u Q=%u RSSI=%d dBm\n",
         (unsigned long)cloudFramesSent,
         (unsigned long)cloudFrameAcks,
         (unsigned long)cloudFrameAckTimeouts,
         cloudFrameInFlight ? "yes" : "no",
+        cloudMotionMode ? "motion" : "idle",
         lastCloudFrameAckMs,
         (unsigned int)lastCloudFrameBytes,
         cloudJpegQuality,

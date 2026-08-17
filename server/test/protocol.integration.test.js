@@ -354,6 +354,57 @@ test("binary camera frames relay without base64 encoding", async () => {
   }
 });
 
+test("camera movement actions notify esp-cam before motion frames", async () => {
+  const vehicleId = `test-camera-motion-${Date.now()}`;
+  const url = `ws://127.0.0.1:${serverPort}`;
+  const esp = await connectClient(url);
+  const camera = await connectClient(url);
+  const controller = await connectClient(url);
+
+  try {
+    sendJson(esp, { type: "identify", clientType: "esp", vehicleId });
+    await waitForMessage(esp, (msg) => msg.type === "ack");
+
+    sendJson(camera, { type: "identify", clientType: "esp-cam", vehicleId });
+    await waitForMessage(camera, (msg) => msg.type === "ack");
+
+    sendJson(controller, {
+      type: "identify",
+      clientType: "web-controller",
+      vehicleId,
+    });
+    await waitForMessage(controller, (msg) => msg.type === "ack");
+
+    const commandId = `camera-motion-${Date.now()}`;
+    const cameraMotion = waitForMessage(
+      camera,
+      (msg) => msg.type === "camera_motion" && msg.action === "CAM_LEFT"
+    );
+    const espAction = waitForMessage(
+      esp,
+      (msg) => msg.type === "action" && msg.commandId === commandId
+    );
+
+    sendJson(controller, {
+      type: "action",
+      vehicleId,
+      source: "keyboard",
+      action: "CAM_LEFT",
+      timestamp: Date.now(),
+      commandId,
+    });
+
+    const motion = await cameraMotion;
+    assert.equal(motion.holdMs, 650);
+    assert.equal(motion.vehicleId, vehicleId);
+    assert.equal((await espAction).action, "CAM_LEFT");
+  } finally {
+    esp.close();
+    camera.close();
+    controller.close();
+  }
+});
+
 test("wifi scan request and result travel between controller and esp", async () => {
   const vehicleId = `test-wifi-scan-${Date.now()}`;
   const url = `ws://127.0.0.1:${serverPort}`;
