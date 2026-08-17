@@ -70,7 +70,7 @@ Default TB6612FNG pins are declared at the top of the sketch. Change them to mat
 <control_url>?cam=http://<camera-ip>/stream
 ```
 
-The web app stores this camera URL in `localStorage`, so it keeps working after refresh on desktop, phone, and tablet. When cloud WebSocket settings are configured, the ESP32-CAM publishes JPEG frames directly as binary WebSocket messages. The camera waits for a `camera_frame_ack` before capturing the next cloud frame, while the relay and browser keep only the newest frame. This prevents delayed JPEG frames from building up when the connection slows down. With PSRAM, the cloud profile uses VGA (`640x480`), JPEG quality `14`, two frame buffers, and a target interval of `140 ms`; without PSRAM it falls back to QVGA.
+The web app stores this camera URL in `localStorage`, so it keeps working after refresh on desktop, phone, and tablet. When cloud WebSocket settings are configured, the ESP32-CAM publishes JPEG frames directly as binary WebSocket messages. The camera waits for a `camera_frame_ack` before capturing the next cloud frame, while the relay and browser keep only the newest frame. This prevents delayed JPEG frames from building up when the connection slows down. With PSRAM, the low-latency cloud profile uses CIF (`400x296`), JPEG quality `15`, two frame buffers, and a target interval of `120 ms`; without PSRAM it falls back to QVGA.
 
 Deploy the updated relay and web app before flashing this ESP32-CAM firmware. The new firmware expects frame acknowledgements from the relay. The relay remains compatible with the older JSON/Base64 camera frame format during migration.
 

@@ -58,7 +58,9 @@ unsigned long lastCloudFrameErrorLogAt = 0;
 uint32_t cloudFramesSent = 0;
 uint32_t cloudFrameAcks = 0;
 uint32_t cloudFrameAckTimeouts = 0;
-static const unsigned long CLOUD_FRAME_INTERVAL_MS = 140;
+size_t lastCloudFrameBytes = 0;
+unsigned long lastCloudFrameAckMs = 0;
+static const unsigned long CLOUD_FRAME_INTERVAL_MS = 120;
 static const unsigned long CLOUD_FRAME_ACK_TIMEOUT_MS = 2500;
 
 String deviceName();
@@ -181,11 +183,11 @@ bool setupCamera() {
   cam.pixel_format = PIXFORMAT_JPEG;
   cam.grab_mode = CAMERA_GRAB_LATEST;
 
-  // VGA plus binary WebSocket frames gives a useful balance of detail and latency.
+  // CIF keeps enough FPV detail while leaving headroom for JPEG encryption over WSS.
   if (psramFound()) {
-    Serial.println("PSRAM found. Using VGA balanced FPV stream.");
-    cam.frame_size = FRAMESIZE_VGA;
-    cam.jpeg_quality = 14;
+    Serial.println("PSRAM found. Using CIF low-latency cloud stream.");
+    cam.frame_size = FRAMESIZE_CIF;
+    cam.jpeg_quality = 15;
     cam.fb_count = 2;
   } else {
     Serial.println("PSRAM not found. Using QVGA low-latency stream.");
@@ -202,8 +204,8 @@ bool setupCamera() {
 
   sensor_t *sensor = esp_camera_sensor_get();
   if (sensor) {
-    sensor->set_framesize(sensor, psramFound() ? FRAMESIZE_VGA : FRAMESIZE_QVGA);
-    sensor->set_quality(sensor, psramFound() ? 14 : 16);
+    sensor->set_framesize(sensor, psramFound() ? FRAMESIZE_CIF : FRAMESIZE_QVGA);
+    sensor->set_quality(sensor, psramFound() ? 15 : 16);
     sensor->set_vflip(sensor, 0);
     sensor->set_hmirror(sensor, 0);
   }
@@ -408,12 +410,14 @@ void sendCloudFrame() {
     return;
   }
 
-  const bool sent = webSocket.sendBIN(fb->buf, fb->len);
+  const size_t frameBytes = fb->len;
+  const bool sent = webSocket.sendBIN(fb->buf, frameBytes);
   esp_camera_fb_return(fb);
 
   if (sent) {
     cloudFrameInFlight = true;
     cloudFrameSentAt = millis();
+    lastCloudFrameBytes = frameBytes;
     cloudFramesSent++;
   } else {
     sendCloudFrameErrorLog("Cloud frame skipped: WebSocket send failed");
@@ -447,6 +451,9 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload, length);
     if (!error && strcmp(doc["type"] | "", "camera_frame_ack") == 0) {
+      if (cloudFrameInFlight) {
+        lastCloudFrameAckMs = millis() - cloudFrameSentAt;
+      }
       cloudFrameInFlight = false;
       cloudFrameAcks++;
     }
@@ -665,11 +672,13 @@ void loop() {
     lastStatusAt = now;
     if (wsConnected) {
       Serial.printf(
-        "Camera cloud online | sent=%lu ack=%lu timeout=%lu inFlight=%s RSSI=%d dBm\n",
+        "Camera cloud online | sent=%lu ack=%lu timeout=%lu inFlight=%s RTT=%lu ms bytes=%u RSSI=%d dBm\n",
         (unsigned long)cloudFramesSent,
         (unsigned long)cloudFrameAcks,
         (unsigned long)cloudFrameAckTimeouts,
         cloudFrameInFlight ? "yes" : "no",
+        lastCloudFrameAckMs,
+        (unsigned int)lastCloudFrameBytes,
         WiFi.RSSI()
       );
     } else {
