@@ -75,6 +75,22 @@ export interface CameraStatusMessage {
   timestamp: number;
 }
 
+export type CameraStreamProfile = "realtime" | "balanced" | "quality";
+
+export interface CameraStreamStatusMessage {
+  type: "camera_stream_status";
+  vehicleId: string;
+  profile: CameraStreamProfile;
+  mode: "idle" | "motion";
+  fps: number;
+  ackMs: number;
+  frameBytes: number;
+  jpegQuality: number;
+  rssi: number;
+  timeouts: number;
+  timestamp: number;
+}
+
 export interface DeviceLogMessage {
   type: "device_log";
   vehicleId: string;
@@ -134,6 +150,7 @@ export type IncomingMessage =
   | TelemetryMessage
   | CameraFrameMessage
   | CameraStatusMessage
+  | CameraStreamStatusMessage
   | DeviceLogMessage
   | WifiScanResultMessage
   | StatusMessage

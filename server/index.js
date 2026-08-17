@@ -40,7 +40,7 @@ const RATE_LIMIT_CLEANUP_INTERVAL_MS = Number(
   process.env.RATE_LIMIT_CLEANUP_INTERVAL_MS || 120000
 );
 const CAMERA_FRAME_MIN_INTERVAL_MS = Number(
-  process.env.CAMERA_FRAME_MIN_INTERVAL_MS || 120
+  process.env.CAMERA_FRAME_MIN_INTERVAL_MS || 70
 );
 const CAMERA_FRAME_MAX_BYTES = Number(
   process.env.CAMERA_FRAME_MAX_BYTES || 200000
@@ -51,6 +51,13 @@ const CAMERA_CONTROLLER_MAX_BUFFERED_BYTES = Number(
 const ALLOW_LOCALHOST_AUTH_BYPASS =
   String(process.env.ALLOW_LOCALHOST_AUTH_BYPASS || "true").toLowerCase() !==
   "false";
+const CAMERA_MOTION_ACTIONS = new Set([
+  "CAM_UP",
+  "CAM_DOWN",
+  "CAM_LEFT",
+  "CAM_RIGHT",
+  "CAM_RESET",
+]);
 
 const rateLimitByIp = new Map();
 const controlActionRateLimitByKey = new Map();
@@ -256,6 +263,7 @@ function getVehicleEntry(vehicleId) {
       lastTelemetry: null,
       lastStatus: null,
       lastCameraFrame: null,
+      lastCameraStreamStatus: null,
       lastDeviceLogs: [],
     });
   }
@@ -411,6 +419,8 @@ wss.on("connection", (ws, request) => {
     ip,
     lastCameraFrameAt: 0,
     cameraFrameSending: false,
+    cameraFrameSequence: 0,
+    legacyCameraFrameId: null,
   };
 
   logger.info({
@@ -431,6 +441,24 @@ wss.on("connection", (ws, request) => {
         return;
       }
 
+      if (
+        raw.length === 8 &&
+        raw[0] === 0x46 &&
+        raw[1] === 0x50 &&
+        raw[2] === 0x56 &&
+        raw[3] === 0x31
+      ) {
+        ws.meta.legacyCameraFrameId = raw.readUInt32BE(4);
+        return;
+      }
+
+      const legacyFrameId = ws.meta.legacyCameraFrameId;
+      ws.meta.legacyCameraFrameId = null;
+      const frameId = legacyFrameId ?? ++ws.meta.cameraFrameSequence;
+      if (legacyFrameId !== null) {
+        ws.meta.cameraFrameSequence = legacyFrameId;
+      }
+
       const isJpeg =
         raw.length >= 4 &&
         raw[0] === 0xff &&
@@ -439,6 +467,13 @@ wss.on("connection", (ws, request) => {
         raw[raw.length - 1] === 0xd9;
 
       if (!isJpeg || raw.length > CAMERA_FRAME_MAX_BYTES) {
+        safeSend(ws, {
+          type: "camera_frame_ack",
+          frameId,
+          accepted: false,
+          reason: !isJpeg ? "invalid_jpeg" : "frame_too_large",
+          timestamp: Date.now(),
+        });
         logger.warn({
           event: "camera_frame.invalid_binary",
           ip,
@@ -454,6 +489,7 @@ wss.on("connection", (ws, request) => {
       if (now - ws.meta.lastCameraFrameAt < CAMERA_FRAME_MIN_INTERVAL_MS) {
         safeSend(ws, {
           type: "camera_frame_ack",
+          frameId,
           accepted: false,
           reason: "frame_interval",
           timestamp: now,
@@ -468,6 +504,7 @@ wss.on("connection", (ws, request) => {
       broadcastBinaryToControllers(vehicleId, frame);
       safeSend(ws, {
         type: "camera_frame_ack",
+        frameId,
         accepted: true,
         timestamp: now,
       });
@@ -610,6 +647,10 @@ wss.on("connection", (ws, request) => {
           } else {
             safeSend(ws, entry.lastCameraFrame);
           }
+        }
+
+        if (entry.lastCameraStreamStatus) {
+          safeSend(ws, entry.lastCameraStreamStatus);
         }
 
         for (const deviceLog of entry.lastDeviceLogs) {
@@ -783,6 +824,48 @@ wss.on("connection", (ws, request) => {
         return;
       }
 
+      if (data.action === "CAMERA_STREAM_PROFILE") {
+        const profile = data.payload?.profile;
+        if (!["realtime", "balanced", "quality"].includes(profile)) {
+          safeSend(ws, {
+            type: "error",
+            commandId,
+            message: "Invalid camera stream profile",
+          });
+          return;
+        }
+
+        if (!entry.camera) {
+          safeSend(ws, {
+            type: "error",
+            commandId,
+            message: "ESP32-CAM not connected",
+          });
+          return;
+        }
+
+        safeSend(entry.camera, {
+          type: "camera_stream_profile",
+          vehicleId,
+          profile,
+          timestamp: Date.now(),
+        });
+        safeSend(ws, {
+          type: "ack",
+          commandId,
+          message: `camera stream profile forwarded: ${profile}`,
+        });
+        logger.info({
+          event: "camera_stream_profile.forwarded",
+          ip,
+          connectionId,
+          vehicleId,
+          profile,
+          commandId,
+        });
+        return;
+      }
+
       if (!entry.esp) {
         safeSend(ws, {
           type: "error",
@@ -817,6 +900,15 @@ wss.on("connection", (ws, request) => {
         commandId,
       };
 
+      if (CAMERA_MOTION_ACTIONS.has(data.action)) {
+        safeSend(entry.camera, {
+          type: "camera_motion",
+          vehicleId,
+          action: data.action,
+          holdMs: 1200,
+          timestamp: Date.now(),
+        });
+      }
       safeSend(entry.esp, forwarded);
       safeSend(ws, {
         type: "ack",
@@ -910,6 +1002,37 @@ wss.on("connection", (ws, request) => {
 
       entry.lastDeviceLogs = [deviceLog, ...entry.lastDeviceLogs].slice(0, 80);
       broadcastToControllers(vehicleId, deviceLog);
+      return;
+    }
+
+    if (data.type === "camera_stream_status") {
+      if (clientType !== "esp-cam") {
+        safeSend(ws, {
+          type: "error",
+          message: "Only esp-cam can send camera_stream_status",
+        });
+        return;
+      }
+
+      const profile = ["realtime", "balanced", "quality"].includes(data.profile)
+        ? data.profile
+        : "balanced";
+      const cameraStreamStatus = {
+        type: "camera_stream_status",
+        vehicleId,
+        profile,
+        mode: data.mode === "motion" ? "motion" : "idle",
+        fps: Math.max(0, Math.min(30, Number(data.fps) || 0)),
+        ackMs: Math.max(0, Math.min(10000, Number(data.ackMs) || 0)),
+        frameBytes: Math.max(0, Math.min(CAMERA_FRAME_MAX_BYTES, Number(data.frameBytes) || 0)),
+        jpegQuality: Math.max(0, Math.min(63, Number(data.jpegQuality) || 0)),
+        rssi: Math.max(-120, Math.min(0, Number(data.rssi) || -120)),
+        timeouts: Math.max(0, Number(data.timeouts) || 0),
+        timestamp: Date.now(),
+      };
+
+      entry.lastCameraStreamStatus = cameraStreamStatus;
+      broadcastToControllers(vehicleId, cameraStreamStatus);
       return;
     }
 

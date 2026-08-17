@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { DeviceLogEntry } from "@/hooks/useVehicleController";
 import type { VehicleTelemetry } from "@/types/control";
+import type { CameraStreamStatusMessage } from "@/types/socket";
 
 export interface ControllerHistoryEntry {
   id: number;
@@ -44,6 +45,7 @@ interface ControllerInsightsModalProps {
   batterySamples: number[];
   wifiSamples: number[];
   deviceLogs: DeviceLogEntry[];
+  cameraStreamStatus: CameraStreamStatusMessage | null;
 }
 
 type TabKey = "telemetry" | "history" | "logs";
@@ -79,6 +81,13 @@ function sparklinePath(values: number[], width: number, height: number) {
     .join(" ");
 }
 
+function cameraStreamProfileLabel(profile?: CameraStreamStatusMessage["profile"]) {
+  if (profile === "realtime") return "ลื่น";
+  if (profile === "quality") return "ชัด";
+  if (profile === "balanced") return "สมดุล";
+  return "รอข้อมูล";
+}
+
 export default function ControllerInsightsModal({
   open,
   onClose,
@@ -93,6 +102,7 @@ export default function ControllerInsightsModal({
   batterySamples,
   wifiSamples,
   deviceLogs,
+  cameraStreamStatus,
 }: ControllerInsightsModalProps) {
   const [tab, setTab] = useState<TabKey>("telemetry");
   const [logFilter, setLogFilter] = useState<LogFilter>("all");
@@ -284,6 +294,33 @@ export default function ControllerInsightsModal({
 
               <div className="rounded-2xl glass-chip p-3 text-sm text-slate-600">
                 Last Error: {lastError || "None"}
+              </div>
+
+              <div className="rounded-2xl glass-chip p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-slate-900">Camera Stream</p>
+                  <span className="text-xs font-semibold text-emerald-700">
+                    {cameraStreamProfileLabel(cameraStreamStatus?.profile)}
+                  </span>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                  <div className="rounded-lg bg-white/55 p-2">
+                    <p className="text-slate-400">FPS</p>
+                    <p className="mt-1 font-semibold text-slate-900">{cameraStreamStatus?.fps.toFixed(1) ?? "-"}</p>
+                  </div>
+                  <div className="rounded-lg bg-white/55 p-2">
+                    <p className="text-slate-400">Frame RTT</p>
+                    <p className="mt-1 font-semibold text-slate-900">{cameraStreamStatus ? `${cameraStreamStatus.ackMs} ms` : "-"}</p>
+                  </div>
+                  <div className="rounded-lg bg-white/55 p-2">
+                    <p className="text-slate-400">Frame Size</p>
+                    <p className="mt-1 font-semibold text-slate-900">{cameraStreamStatus ? `${Math.round(cameraStreamStatus.frameBytes / 1024)} KB` : "-"}</p>
+                  </div>
+                  <div className="rounded-lg bg-white/55 p-2">
+                    <p className="text-slate-400">Mode</p>
+                    <p className="mt-1 font-semibold text-slate-900">{cameraStreamStatus?.mode ?? "-"}</p>
+                  </div>
+                </div>
               </div>
             </>
           )}
