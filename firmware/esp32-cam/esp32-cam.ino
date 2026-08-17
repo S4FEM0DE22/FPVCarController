@@ -63,6 +63,9 @@ unsigned long lastCloudFrameErrorLogAt = 0;
 uint32_t cloudFramesSent = 0;
 uint32_t cloudFrameAcks = 0;
 uint32_t cloudFrameAckTimeouts = 0;
+uint32_t cloudStaleFrameAcks = 0;
+uint32_t cloudFrameSequence = 0;
+uint32_t cloudFrameInFlightId = 0;
 uint32_t cloudFramesAtLastStatus = 0;
 size_t lastCloudFrameBytes = 0;
 unsigned long lastCloudFrameAckMs = 0;
@@ -507,12 +510,17 @@ void sendCloudFrameErrorLog(const String &message) {
 void setCloudMotionMode(bool active) {
   if (!cameraHasPsram || !cameraSensor || cloudMotionMode == active) return;
 
+  const framesize_t previousFrameSize = cloudMotionMode
+    ? cloudMotionFrameSize()
+    : cloudIdleFrameSize();
   cloudMotionMode = active;
+  const framesize_t nextFrameSize = cloudMotionMode
+    ? cloudMotionFrameSize()
+    : cloudIdleFrameSize();
   stableCloudFrameCount = 0;
-  cameraSensor->set_framesize(
-    cameraSensor,
-    cloudMotionMode ? cloudMotionFrameSize() : cloudIdleFrameSize()
-  );
+  if (nextFrameSize != previousFrameSize) {
+    cameraSensor->set_framesize(cameraSensor, nextFrameSize);
+  }
 
   if (cloudMotionMode && cloudJpegQuality < cloudJpegQualityMin + 3) {
     cloudJpegQuality = min<uint8_t>(cloudJpegQualityMax, cloudJpegQualityMin + 3);
@@ -565,6 +573,7 @@ void sendCloudFrame() {
     if (now - cloudFrameSentAt < cloudFrameAckTimeoutMs) return;
 
     cloudFrameInFlight = false;
+    cloudFrameInFlightId = 0;
     cloudFrameAckTimeouts++;
     sendCloudFrameErrorLog("Camera frame ACK timeout; dropping stale frame");
   }
@@ -580,11 +589,21 @@ void sendCloudFrame() {
   }
 
   const size_t frameBytes = fb->len;
-  const bool sent = webSocket.sendBIN(fb->buf, frameBytes);
+  const uint32_t frameId = ++cloudFrameSequence;
+  uint8_t frameHeader[8] = {
+    'F', 'P', 'V', '1',
+    (uint8_t)(frameId >> 24),
+    (uint8_t)(frameId >> 16),
+    (uint8_t)(frameId >> 8),
+    (uint8_t)frameId,
+  };
+  const bool headerSent = webSocket.sendBIN(frameHeader, sizeof(frameHeader));
+  const bool sent = headerSent && webSocket.sendBIN(fb->buf, frameBytes);
   esp_camera_fb_return(fb);
 
   if (sent) {
     cloudFrameInFlight = true;
+    cloudFrameInFlightId = frameId;
     cloudFrameSentAt = millis();
     lastCloudFrameBytes = frameBytes;
     cloudFramesSent++;
@@ -597,6 +616,7 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   if (type == WStype_CONNECTED) {
     wsConnected = true;
     cloudFrameInFlight = false;
+    cloudFrameInFlightId = 0;
     Serial.print("Camera WebSocket connected: ");
     Serial.print(config.wsScheme);
     Serial.print("://");
@@ -614,6 +634,7 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   if (type == WStype_DISCONNECTED) {
     wsConnected = false;
     cloudFrameInFlight = false;
+    cloudFrameInFlightId = 0;
     return;
   }
 
@@ -624,17 +645,24 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 
     const char *messageType = doc["type"] | "";
     if (strcmp(messageType, "camera_frame_ack") == 0) {
-      if (cloudFrameInFlight) {
-        lastCloudFrameAckMs = millis() - cloudFrameSentAt;
+      const uint32_t ackFrameId = doc["frameId"] | 0;
+      if (!cloudFrameInFlight || ackFrameId != cloudFrameInFlightId) {
+        cloudStaleFrameAcks++;
+        return;
       }
+
+      lastCloudFrameAckMs = millis() - cloudFrameSentAt;
       cloudFrameInFlight = false;
+      cloudFrameInFlightId = 0;
       cloudFrameAcks++;
-      tuneCloudJpegQuality();
+      if (doc["accepted"] | false) {
+        tuneCloudJpegQuality();
+      }
       return;
     }
 
     if (strcmp(messageType, "camera_motion") == 0) {
-      unsigned long holdMs = doc["holdMs"] | 500;
+      unsigned long holdMs = doc["holdMs"] | 1200;
       holdMs = constrain(holdMs, 250UL, 2000UL);
       cloudMotionUntil = millis() + holdMs;
       setCloudMotionMode(true);
@@ -880,9 +908,10 @@ void loop() {
     cloudFramesAtLastStatus = cloudFramesSent;
     if (wsConnected) {
       Serial.printf(
-        "Camera cloud online | sent=%lu ack=%lu timeout=%lu inFlight=%s profile=%s mode=%s FPS=%.1f RTT=%lu ms bytes=%u Q=%u RSSI=%d dBm\n",
+        "Camera cloud online | sent=%lu ack=%lu staleAck=%lu timeout=%lu inFlight=%s profile=%s mode=%s FPS=%.1f RTT=%lu ms bytes=%u Q=%u RSSI=%d dBm\n",
         (unsigned long)cloudFramesSent,
         (unsigned long)cloudFrameAcks,
+        (unsigned long)cloudStaleFrameAcks,
         (unsigned long)cloudFrameAckTimeouts,
         cloudFrameInFlight ? "yes" : "no",
         config.streamProfile,

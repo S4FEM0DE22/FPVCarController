@@ -78,7 +78,7 @@ The Vehicle tab in Settings provides three persistent cloud stream profiles:
 - `balanced`: HVGA (`480x320`) while idle and QVGA while the camera moves.
 - `quality`: VGA (`640x480`) while idle and CIF (`400x296`) while the camera moves.
 
-The camera returns to its idle resolution about `500 ms` after movement stops. JPEG compression adapts independently inside each profile from frame size and ACK latency. Lost-frame ACK timeouts are shortened to `700-1500 ms` depending on the profile, preventing one dropped acknowledgement from freezing the feed for several seconds. The ESP32-CAM saves the selected profile in Preferences and reports FPS, frame RTT, frame size, RSSI, and timeout counters to Controller Insights. Without PSRAM it falls back to QVGA.
+The camera returns to its idle resolution about `1200 ms` after movement stops, avoiding repeated sensor reconfiguration during intermittent pan/tilt input. The realtime profile skips sensor reconfiguration entirely because its idle and motion resolutions are both QVGA. JPEG compression adapts independently inside each profile from frame size and ACK latency. Lost-frame ACK timeouts are shortened to `700-1500 ms` depending on the profile, and every binary frame carries an ID so a late acknowledgement cannot release a newer in-flight frame. The ESP32-CAM saves the selected profile in Preferences and reports FPS, frame RTT, frame size, RSSI, and timeout counters to Controller Insights. Without PSRAM it falls back to QVGA.
 
 Deploy the updated relay and web app before flashing this ESP32-CAM firmware. The new firmware expects frame acknowledgements from the relay. The relay remains compatible with the older JSON/Base64 camera frame format during migration.
 

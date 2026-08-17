@@ -354,6 +354,47 @@ test("binary camera frames relay without base64 encoding", async () => {
   }
 });
 
+test("binary camera frame acknowledgements preserve the frame ID", async () => {
+  const vehicleId = `test-camera-frame-id-${Date.now()}`;
+  const url = `ws://127.0.0.1:${serverPort}`;
+  const camera = await connectClient(url);
+  const controller = await connectClient(url);
+
+  try {
+    sendJson(camera, { type: "identify", clientType: "esp-cam", vehicleId });
+    await waitForMessage(camera, (msg) => msg.type === "ack");
+
+    sendJson(controller, {
+      type: "identify",
+      clientType: "web-controller",
+      vehicleId,
+    });
+    await waitForMessage(controller, (msg) => msg.type === "ack");
+
+    const frameId = 42;
+    const header = Buffer.alloc(8);
+    header.write("FPV1", 0, "ascii");
+    header.writeUInt32BE(frameId, 4);
+    camera.send(header, { binary: true });
+
+    const frameAck = waitForMessage(
+      camera,
+      (msg) => msg.type === "camera_frame_ack" && msg.frameId === frameId
+    );
+    camera.send(
+      Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x01, 0xff, 0xd9]),
+      { binary: true }
+    );
+
+    const ack = await frameAck;
+    assert.equal(ack.accepted, true);
+    assert.equal(ack.frameId, frameId);
+  } finally {
+    camera.close();
+    controller.close();
+  }
+});
+
 test("camera movement actions notify esp-cam before motion frames", async () => {
   const vehicleId = `test-camera-motion-${Date.now()}`;
   const url = `ws://127.0.0.1:${serverPort}`;
@@ -395,7 +436,7 @@ test("camera movement actions notify esp-cam before motion frames", async () => 
     });
 
     const motion = await cameraMotion;
-    assert.equal(motion.holdMs, 500);
+    assert.equal(motion.holdMs, 1200);
     assert.equal(motion.vehicleId, vehicleId);
     assert.equal((await espAction).action, "CAM_LEFT");
   } finally {

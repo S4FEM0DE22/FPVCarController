@@ -419,6 +419,7 @@ wss.on("connection", (ws, request) => {
     ip,
     lastCameraFrameAt: 0,
     cameraFrameSending: false,
+    nextCameraFrameId: null,
   };
 
   logger.info({
@@ -439,6 +440,20 @@ wss.on("connection", (ws, request) => {
         return;
       }
 
+      if (
+        raw.length === 8 &&
+        raw[0] === 0x46 &&
+        raw[1] === 0x50 &&
+        raw[2] === 0x56 &&
+        raw[3] === 0x31
+      ) {
+        ws.meta.nextCameraFrameId = raw.readUInt32BE(4);
+        return;
+      }
+
+      const frameId = ws.meta.nextCameraFrameId;
+      ws.meta.nextCameraFrameId = null;
+
       const isJpeg =
         raw.length >= 4 &&
         raw[0] === 0xff &&
@@ -447,6 +462,13 @@ wss.on("connection", (ws, request) => {
         raw[raw.length - 1] === 0xd9;
 
       if (!isJpeg || raw.length > CAMERA_FRAME_MAX_BYTES) {
+        safeSend(ws, {
+          type: "camera_frame_ack",
+          frameId,
+          accepted: false,
+          reason: !isJpeg ? "invalid_jpeg" : "frame_too_large",
+          timestamp: Date.now(),
+        });
         logger.warn({
           event: "camera_frame.invalid_binary",
           ip,
@@ -462,6 +484,7 @@ wss.on("connection", (ws, request) => {
       if (now - ws.meta.lastCameraFrameAt < CAMERA_FRAME_MIN_INTERVAL_MS) {
         safeSend(ws, {
           type: "camera_frame_ack",
+          frameId,
           accepted: false,
           reason: "frame_interval",
           timestamp: now,
@@ -476,6 +499,7 @@ wss.on("connection", (ws, request) => {
       broadcastBinaryToControllers(vehicleId, frame);
       safeSend(ws, {
         type: "camera_frame_ack",
+        frameId,
         accepted: true,
         timestamp: now,
       });
@@ -876,7 +900,7 @@ wss.on("connection", (ws, request) => {
           type: "camera_motion",
           vehicleId,
           action: data.action,
-          holdMs: 500,
+          holdMs: 1200,
           timestamp: Date.now(),
         });
       }
