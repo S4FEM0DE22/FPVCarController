@@ -47,7 +47,9 @@ Preferences prefs;
 WebServer server(80);
 WebSocketsClient webSocket;
 CamConfig config;
+sensor_t *cameraSensor = nullptr;
 bool cameraReady = false;
+bool cameraHasPsram = false;
 bool flashOn = false;
 bool wsConnected = false;
 bool cloudFrameInFlight = false;
@@ -60,14 +62,21 @@ uint32_t cloudFrameAcks = 0;
 uint32_t cloudFrameAckTimeouts = 0;
 size_t lastCloudFrameBytes = 0;
 unsigned long lastCloudFrameAckMs = 0;
+uint8_t cloudJpegQuality = 17;
+uint8_t stableCloudFrameCount = 0;
 static const unsigned long CLOUD_FRAME_INTERVAL_MS = 120;
 static const unsigned long CLOUD_FRAME_ACK_TIMEOUT_MS = 2500;
+static const uint8_t CLOUD_JPEG_QUALITY_MIN = 15;
+static const uint8_t CLOUD_JPEG_QUALITY_MAX = 24;
+static const size_t CLOUD_FRAME_TARGET_BYTES = 36000;
+static const unsigned long CLOUD_FRAME_TARGET_ACK_MS = 320;
 
 String deviceName();
 String streamUrl();
 String controlUrlWithCamera();
 void sendCloudFrame();
 void sendDeviceLog(const char *level, const String &message);
+void tuneCloudJpegQuality();
 
 void printCameraConfig() {
   Serial.println();
@@ -183,11 +192,13 @@ bool setupCamera() {
   cam.pixel_format = PIXFORMAT_JPEG;
   cam.grab_mode = CAMERA_GRAB_LATEST;
 
-  // CIF keeps enough FPV detail while leaving headroom for JPEG encryption over WSS.
-  if (psramFound()) {
-    Serial.println("PSRAM found. Using CIF low-latency cloud stream.");
-    cam.frame_size = FRAMESIZE_CIF;
-    cam.jpeg_quality = 15;
+  cameraHasPsram = psramFound();
+
+  // HVGA improves detail while adaptive JPEG compression protects motion latency.
+  if (cameraHasPsram) {
+    Serial.println("PSRAM found. Using HVGA adaptive cloud stream.");
+    cam.frame_size = FRAMESIZE_HVGA;
+    cam.jpeg_quality = cloudJpegQuality;
     cam.fb_count = 2;
   } else {
     Serial.println("PSRAM not found. Using QVGA low-latency stream.");
@@ -202,12 +213,12 @@ bool setupCamera() {
     return false;
   }
 
-  sensor_t *sensor = esp_camera_sensor_get();
-  if (sensor) {
-    sensor->set_framesize(sensor, psramFound() ? FRAMESIZE_CIF : FRAMESIZE_QVGA);
-    sensor->set_quality(sensor, psramFound() ? 15 : 16);
-    sensor->set_vflip(sensor, 0);
-    sensor->set_hmirror(sensor, 0);
+  cameraSensor = esp_camera_sensor_get();
+  if (cameraSensor) {
+    cameraSensor->set_framesize(cameraSensor, cameraHasPsram ? FRAMESIZE_HVGA : FRAMESIZE_QVGA);
+    cameraSensor->set_quality(cameraSensor, cameraHasPsram ? cloudJpegQuality : 16);
+    cameraSensor->set_vflip(cameraSensor, 0);
+    cameraSensor->set_hmirror(cameraSensor, 0);
   }
 
   Serial.println("Camera init OK");
@@ -388,6 +399,37 @@ void sendCloudFrameErrorLog(const String &message) {
   sendDeviceLog("warn", message);
 }
 
+void tuneCloudJpegQuality() {
+  if (!cameraHasPsram || !cameraSensor || lastCloudFrameAckMs == 0) return;
+
+  uint8_t nextQuality = cloudJpegQuality;
+  const bool overloaded =
+    lastCloudFrameBytes > CLOUD_FRAME_TARGET_BYTES ||
+    lastCloudFrameAckMs > CLOUD_FRAME_TARGET_ACK_MS;
+  const bool stable =
+    lastCloudFrameBytes < 26000 &&
+    lastCloudFrameAckMs < 220;
+
+  if (overloaded) {
+    stableCloudFrameCount = 0;
+    nextQuality = min<uint8_t>(CLOUD_JPEG_QUALITY_MAX, cloudJpegQuality + 2);
+  } else if (stable) {
+    stableCloudFrameCount++;
+    if (stableCloudFrameCount >= 8 && cloudJpegQuality > CLOUD_JPEG_QUALITY_MIN) {
+      stableCloudFrameCount = 0;
+      nextQuality = cloudJpegQuality - 1;
+    }
+  } else {
+    stableCloudFrameCount = 0;
+  }
+
+  if (nextQuality != cloudJpegQuality) {
+    cloudJpegQuality = nextQuality;
+    cameraSensor->set_quality(cameraSensor, cloudJpegQuality);
+    Serial.printf("Adaptive JPEG quality changed to %u\n", cloudJpegQuality);
+  }
+}
+
 void sendCloudFrame() {
   if (!cameraReady || !wsConnected) return;
 
@@ -456,6 +498,7 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
       }
       cloudFrameInFlight = false;
       cloudFrameAcks++;
+      tuneCloudJpegQuality();
     }
     return;
   }
@@ -672,13 +715,14 @@ void loop() {
     lastStatusAt = now;
     if (wsConnected) {
       Serial.printf(
-        "Camera cloud online | sent=%lu ack=%lu timeout=%lu inFlight=%s RTT=%lu ms bytes=%u RSSI=%d dBm\n",
+        "Camera cloud online | sent=%lu ack=%lu timeout=%lu inFlight=%s RTT=%lu ms bytes=%u Q=%u RSSI=%d dBm\n",
         (unsigned long)cloudFramesSent,
         (unsigned long)cloudFrameAcks,
         (unsigned long)cloudFrameAckTimeouts,
         cloudFrameInFlight ? "yes" : "no",
         lastCloudFrameAckMs,
         (unsigned int)lastCloudFrameBytes,
+        cloudJpegQuality,
         WiFi.RSSI()
       );
     } else {
