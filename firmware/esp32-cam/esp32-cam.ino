@@ -53,10 +53,8 @@ bool cameraReady = false;
 bool cameraHasPsram = false;
 bool flashOn = false;
 bool wsConnected = false;
-bool cloudFrameInFlight = false;
 bool cloudMotionMode = false;
 unsigned long lastFrameAt = 0;
-unsigned long cloudFrameSentAt = 0;
 unsigned long cloudMotionUntil = 0;
 unsigned long lastStatusAt = 0;
 unsigned long lastCloudFrameErrorLogAt = 0;
@@ -65,7 +63,9 @@ uint32_t cloudFrameAcks = 0;
 uint32_t cloudFrameAckTimeouts = 0;
 uint32_t cloudStaleFrameAcks = 0;
 uint32_t cloudFrameSequence = 0;
-uint32_t cloudFrameInFlightId = 0;
+static const uint8_t CLOUD_PENDING_FRAME_SLOTS = 24;
+uint32_t pendingCloudFrameIds[CLOUD_PENDING_FRAME_SLOTS] = {};
+unsigned long pendingCloudFrameSentAt[CLOUD_PENDING_FRAME_SLOTS] = {};
 uint32_t cloudFramesAtLastStatus = 0;
 size_t lastCloudFrameBytes = 0;
 unsigned long lastCloudFrameAckMs = 0;
@@ -200,7 +200,7 @@ void applyCloudStreamProfile(const char *profile, bool persist) {
 
   if (strcmp(nextProfile, "realtime") == 0) {
     cloudFrameIntervalMs = 75;
-    cloudFrameAckTimeoutMs = 700;
+    cloudFrameAckTimeoutMs = 1500;
     cloudJpegQualityMin = 20;
     cloudJpegQualityMax = 30;
     cloudFrameTargetBytes = 22000;
@@ -208,7 +208,7 @@ void applyCloudStreamProfile(const char *profile, bool persist) {
     cloudJpegQuality = max<uint8_t>(22, cloudJpegQuality);
   } else if (strcmp(nextProfile, "quality") == 0) {
     cloudFrameIntervalMs = 140;
-    cloudFrameAckTimeoutMs = 1500;
+    cloudFrameAckTimeoutMs = 2500;
     cloudJpegQualityMin = 13;
     cloudJpegQualityMax = 22;
     cloudFrameTargetBytes = 50000;
@@ -216,7 +216,7 @@ void applyCloudStreamProfile(const char *profile, bool persist) {
     cloudJpegQuality = min<uint8_t>(18, cloudJpegQuality);
   } else {
     cloudFrameIntervalMs = 90;
-    cloudFrameAckTimeoutMs = 1000;
+    cloudFrameAckTimeoutMs = 1800;
     cloudJpegQualityMin = 15;
     cloudJpegQualityMax = 26;
     cloudFrameTargetBytes = 32000;
@@ -565,20 +565,60 @@ void tuneCloudJpegQuality() {
   }
 }
 
+void clearPendingCloudFrameAcks() {
+  memset(pendingCloudFrameIds, 0, sizeof(pendingCloudFrameIds));
+  memset(pendingCloudFrameSentAt, 0, sizeof(pendingCloudFrameSentAt));
+}
+
+bool hasPendingCloudFrameAcks() {
+  for (uint8_t index = 0; index < CLOUD_PENDING_FRAME_SLOTS; index++) {
+    if (pendingCloudFrameIds[index] != 0) return true;
+  }
+  return false;
+}
+
+void expirePendingCloudFrameAcks(unsigned long now) {
+  for (uint8_t index = 0; index < CLOUD_PENDING_FRAME_SLOTS; index++) {
+    if (
+      pendingCloudFrameIds[index] != 0 &&
+      now - pendingCloudFrameSentAt[index] >= cloudFrameAckTimeoutMs
+    ) {
+      pendingCloudFrameIds[index] = 0;
+      pendingCloudFrameSentAt[index] = 0;
+      cloudFrameAckTimeouts++;
+    }
+  }
+}
+
+void trackPendingCloudFrameAck(uint32_t frameId, unsigned long sentAt) {
+  const uint8_t index = frameId % CLOUD_PENDING_FRAME_SLOTS;
+  if (pendingCloudFrameIds[index] != 0) {
+    cloudFrameAckTimeouts++;
+  }
+  pendingCloudFrameIds[index] = frameId;
+  pendingCloudFrameSentAt[index] = sentAt;
+}
+
+bool completePendingCloudFrameAck(
+  uint32_t frameId,
+  unsigned long now,
+  unsigned long &roundTripMs
+) {
+  const uint8_t index = frameId % CLOUD_PENDING_FRAME_SLOTS;
+  if (pendingCloudFrameIds[index] != frameId) return false;
+
+  roundTripMs = now - pendingCloudFrameSentAt[index];
+  pendingCloudFrameIds[index] = 0;
+  pendingCloudFrameSentAt[index] = 0;
+  return true;
+}
+
 void sendCloudFrame() {
   if (!cameraReady || !wsConnected) return;
 
   const unsigned long now = millis();
-  if (cloudFrameInFlight) {
-    if (now - cloudFrameSentAt < cloudFrameAckTimeoutMs) return;
-
-    cloudFrameInFlight = false;
-    cloudFrameInFlightId = 0;
-    cloudFrameAckTimeouts++;
-    sendCloudFrameErrorLog("Camera frame ACK timeout; dropping stale frame");
-  }
-
   if (now - lastFrameAt < cloudFrameIntervalMs) return;
+  expirePendingCloudFrameAcks(now);
   lastFrameAt = now;
 
   camera_fb_t *fb = esp_camera_fb_get();
@@ -595,9 +635,7 @@ void sendCloudFrame() {
 
   if (sent) {
     cloudFrameSequence = frameId;
-    cloudFrameInFlight = true;
-    cloudFrameInFlightId = frameId;
-    cloudFrameSentAt = millis();
+    trackPendingCloudFrameAck(frameId, millis());
     lastCloudFrameBytes = frameBytes;
     cloudFramesSent++;
   } else {
@@ -608,9 +646,8 @@ void sendCloudFrame() {
 void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   if (type == WStype_CONNECTED) {
     wsConnected = true;
-    cloudFrameInFlight = false;
-    cloudFrameInFlightId = 0;
     cloudFrameSequence = 0;
+    clearPendingCloudFrameAcks();
     Serial.print("Camera WebSocket connected: ");
     Serial.print(config.wsScheme);
     Serial.print("://");
@@ -627,8 +664,7 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 
   if (type == WStype_DISCONNECTED) {
     wsConnected = false;
-    cloudFrameInFlight = false;
-    cloudFrameInFlightId = 0;
+    clearPendingCloudFrameAcks();
     return;
   }
 
@@ -640,14 +676,13 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
     const char *messageType = doc["type"] | "";
     if (strcmp(messageType, "camera_frame_ack") == 0) {
       const uint32_t ackFrameId = doc["frameId"] | 0;
-      if (!cloudFrameInFlight || ackFrameId != cloudFrameInFlightId) {
+      unsigned long frameRoundTripMs = 0;
+      if (!completePendingCloudFrameAck(ackFrameId, millis(), frameRoundTripMs)) {
         cloudStaleFrameAcks++;
         return;
       }
 
-      lastCloudFrameAckMs = millis() - cloudFrameSentAt;
-      cloudFrameInFlight = false;
-      cloudFrameInFlightId = 0;
+      lastCloudFrameAckMs = frameRoundTripMs;
       cloudFrameAcks++;
       if (doc["accepted"] | false) {
         tuneCloudJpegQuality();
@@ -902,12 +937,12 @@ void loop() {
     cloudFramesAtLastStatus = cloudFramesSent;
     if (wsConnected) {
       Serial.printf(
-        "Camera cloud online | sent=%lu ack=%lu staleAck=%lu timeout=%lu inFlight=%s profile=%s mode=%s FPS=%.1f RTT=%lu ms bytes=%u Q=%u RSSI=%d dBm\n",
+        "Camera cloud online | sent=%lu ack=%lu staleAck=%lu timeout=%lu pending=%s profile=%s mode=%s FPS=%.1f RTT=%lu ms bytes=%u Q=%u RSSI=%d dBm\n",
         (unsigned long)cloudFramesSent,
         (unsigned long)cloudFrameAcks,
         (unsigned long)cloudStaleFrameAcks,
         (unsigned long)cloudFrameAckTimeouts,
-        cloudFrameInFlight ? "yes" : "no",
+        hasPendingCloudFrameAcks() ? "yes" : "no",
         config.streamProfile,
         cloudMotionMode ? "motion" : "idle",
         cloudFps,
