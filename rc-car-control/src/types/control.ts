@@ -20,6 +20,7 @@ export type ActionCommand =
   | "CAMERA_TOGGLE"
   | "LIGHT_TOGGLE"
   | "HORN"
+  | "CAMERA_STREAM_PROFILE"
   | "PROFILE_APPLY"
   | "WIFI_SCAN"
   | "WIFI_SET"

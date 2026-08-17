@@ -395,11 +395,101 @@ test("camera movement actions notify esp-cam before motion frames", async () => 
     });
 
     const motion = await cameraMotion;
-    assert.equal(motion.holdMs, 650);
+    assert.equal(motion.holdMs, 500);
     assert.equal(motion.vehicleId, vehicleId);
     assert.equal((await espAction).action, "CAM_LEFT");
   } finally {
     esp.close();
+    camera.close();
+    controller.close();
+  }
+});
+
+test("camera stream profile reaches esp-cam without the vehicle ESP", async () => {
+  const vehicleId = `test-camera-profile-${Date.now()}`;
+  const url = `ws://127.0.0.1:${serverPort}`;
+  const camera = await connectClient(url);
+  const controller = await connectClient(url);
+
+  try {
+    sendJson(camera, { type: "identify", clientType: "esp-cam", vehicleId });
+    await waitForMessage(camera, (msg) => msg.type === "ack");
+
+    sendJson(controller, {
+      type: "identify",
+      clientType: "web-controller",
+      vehicleId,
+    });
+    await waitForMessage(controller, (msg) => msg.type === "ack");
+
+    const profileMessage = waitForMessage(
+      camera,
+      (msg) => msg.type === "camera_stream_profile"
+    );
+    const commandId = `profile-${Date.now()}`;
+    sendJson(controller, {
+      type: "action",
+      vehicleId,
+      source: "system",
+      action: "CAMERA_STREAM_PROFILE",
+      payload: { profile: "realtime" },
+      timestamp: Date.now(),
+      commandId,
+    });
+
+    assert.equal((await profileMessage).profile, "realtime");
+    const ack = await waitForMessage(
+      controller,
+      (msg) => msg.type === "ack" && msg.commandId === commandId
+    );
+    assert.match(ack.message, /realtime/);
+  } finally {
+    camera.close();
+    controller.close();
+  }
+});
+
+test("camera stream status is sanitized and relayed to controllers", async () => {
+  const vehicleId = `test-camera-stream-status-${Date.now()}`;
+  const url = `ws://127.0.0.1:${serverPort}`;
+  const camera = await connectClient(url);
+  const controller = await connectClient(url);
+
+  try {
+    sendJson(camera, { type: "identify", clientType: "esp-cam", vehicleId });
+    await waitForMessage(camera, (msg) => msg.type === "ack");
+
+    sendJson(controller, {
+      type: "identify",
+      clientType: "web-controller",
+      vehicleId,
+    });
+    await waitForMessage(controller, (msg) => msg.type === "ack");
+
+    const statusMessage = waitForMessage(
+      controller,
+      (msg) => msg.type === "camera_stream_status"
+    );
+    sendJson(camera, {
+      type: "camera_stream_status",
+      vehicleId,
+      profile: "realtime",
+      mode: "motion",
+      fps: 12.4,
+      ackMs: 87,
+      frameBytes: 18400,
+      jpegQuality: 23,
+      rssi: -48,
+      timeouts: 2,
+    });
+
+    const status = await statusMessage;
+    assert.equal(status.profile, "realtime");
+    assert.equal(status.mode, "motion");
+    assert.equal(status.fps, 12.4);
+    assert.equal(status.ackMs, 87);
+    assert.equal(status.frameBytes, 18400);
+  } finally {
     camera.close();
     controller.close();
   }

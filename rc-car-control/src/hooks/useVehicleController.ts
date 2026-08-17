@@ -15,7 +15,11 @@ import type {
   ControlCommand,
   VehicleTelemetry,
 } from "@/types/control";
-import type { IncomingMessage, WifiNetwork } from "@/types/socket";
+import type {
+  CameraStreamStatusMessage,
+  IncomingMessage,
+  WifiNetwork,
+} from "@/types/socket";
 
 type StatusState = "waiting" | "offline" | "moving" | "idle" | "error";
 export type WifiScanState = "idle" | "scanning" | "ready" | "error";
@@ -95,6 +99,8 @@ export default function useVehicleController() {
   const [telemetry, setTelemetry] = useState<VehicleTelemetry>(initialTelemetry);
   const [cameraFrameSrc, setCameraFrameSrc] = useState("");
   const [cameraOnline, setCameraOnline] = useState(false);
+  const [cameraStreamStatus, setCameraStreamStatus] =
+    useState<CameraStreamStatusMessage | null>(null);
   const [deviceLogs, setDeviceLogs] = useState<DeviceLogEntry[]>([]);
   const [wifiNetworks, setWifiNetworks] = useState<WifiNetwork[]>([]);
   const [wifiScanState, setWifiScanState] = useState<WifiScanState>("idle");
@@ -259,7 +265,15 @@ export default function useVehicleController() {
 
     if (message.type === "camera_status") {
       setCameraOnline(message.online);
-      if (!message.online) replaceCameraFrame("");
+      if (!message.online) {
+        replaceCameraFrame("");
+        setCameraStreamStatus(null);
+      }
+    }
+
+    if (message.type === "camera_stream_status") {
+      setCameraOnline(true);
+      setCameraStreamStatus(message);
     }
 
     if (message.type === "device_log") {
@@ -550,6 +564,7 @@ export default function useVehicleController() {
     cameraOrientation,
     cameraFrameSrc,
     cameraOnline,
+    cameraStreamStatus,
     connectionState,
     latency,
     lastError,

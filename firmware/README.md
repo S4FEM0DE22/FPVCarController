@@ -70,7 +70,15 @@ Default TB6612FNG pins are declared at the top of the sketch. Change them to mat
 <control_url>?cam=http://<camera-ip>/stream
 ```
 
-The web app stores this camera URL in `localStorage`, so it keeps working after refresh on desktop, phone, and tablet. When cloud WebSocket settings are configured, the ESP32-CAM publishes JPEG frames directly as binary WebSocket messages. The camera waits for a `camera_frame_ack` before capturing the next cloud frame, while the relay and browser keep only the newest frame. This prevents delayed JPEG frames from building up when the connection slows down. With PSRAM, the balanced cloud profile uses HVGA (`480x320`) while idle and temporarily switches to CIF (`400x296`) when the relay reports a pan/tilt command. It returns to HVGA about `650 ms` after motion stops. JPEG quality also adapts between `15-24` from frame size and ACK latency. Without PSRAM it falls back to QVGA.
+The web app stores this camera URL in `localStorage`, so it keeps working after refresh on desktop, phone, and tablet. When cloud WebSocket settings are configured, the ESP32-CAM publishes JPEG frames directly as binary WebSocket messages. The camera waits for a `camera_frame_ack` before capturing the next cloud frame, while the relay and browser keep only the newest frame. This prevents delayed JPEG frames from building up when the connection slows down.
+
+The Vehicle tab in Settings provides three persistent cloud stream profiles:
+
+- `realtime`: QVGA (`320x240`) with a 75 ms frame interval for driving.
+- `balanced`: HVGA (`480x320`) while idle and QVGA while the camera moves.
+- `quality`: VGA (`640x480`) while idle and CIF (`400x296`) while the camera moves.
+
+The camera returns to its idle resolution about `500 ms` after movement stops. JPEG compression adapts independently inside each profile from frame size and ACK latency. Lost-frame ACK timeouts are shortened to `700-1500 ms` depending on the profile, preventing one dropped acknowledgement from freezing the feed for several seconds. The ESP32-CAM saves the selected profile in Preferences and reports FPS, frame RTT, frame size, RSSI, and timeout counters to Controller Insights. Without PSRAM it falls back to QVGA.
 
 Deploy the updated relay and web app before flashing this ESP32-CAM firmware. The new firmware expects frame acknowledgements from the relay. The relay remains compatible with the older JSON/Base64 camera frame format during migration.
 

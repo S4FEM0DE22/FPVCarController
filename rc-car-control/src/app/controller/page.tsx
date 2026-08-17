@@ -74,6 +74,7 @@ export default function ControllerPage() {
     cameraOrientation,
     cameraFrameSrc,
     cameraOnline,
+    cameraStreamStatus,
     deviceLogs,
     wifiNetworks,
     wifiScanState,
@@ -449,6 +450,11 @@ export default function ControllerPage() {
         onClose={() => setShowSettings(false)}
         onChangeWifi={handleSharedWifiChange}
         vehicleOnline={telemetry.online}
+        cameraOnline={cameraOnline}
+        cameraStreamProfile={cameraStreamStatus?.profile ?? "balanced"}
+        onChangeCameraStreamProfile={async (profile) => {
+          handleSystemAction("CAMERA_STREAM_PROFILE", { profile });
+        }}
         wifiNetworks={wifiNetworks}
         wifiScanState={wifiScanState}
         wifiScanError={wifiScanError}
@@ -495,6 +501,7 @@ export default function ControllerPage() {
         batterySamples={batterySamples}
         wifiSamples={wifiSamples}
         deviceLogs={deviceLogs}
+        cameraStreamStatus={cameraStreamStatus}
       />
 
       {showConnectionNotice && !fullscreenMode && (
