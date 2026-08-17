@@ -11,7 +11,7 @@ module.exports = {
       name: "fpv-web",
       cwd: "/opt/FPVCarController/rc-car-control",
       script: "node_modules/next/dist/bin/next",
-      args: "start -p 3000",
+      args: ["start", "--port", "3000"],
       env: { NODE_ENV: "production" },
     },
   ],
