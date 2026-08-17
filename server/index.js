@@ -419,7 +419,7 @@ wss.on("connection", (ws, request) => {
     ip,
     lastCameraFrameAt: 0,
     cameraFrameSending: false,
-    nextCameraFrameId: null,
+    cameraFrameSequence: 0,
   };
 
   logger.info({
@@ -440,19 +440,7 @@ wss.on("connection", (ws, request) => {
         return;
       }
 
-      if (
-        raw.length === 8 &&
-        raw[0] === 0x46 &&
-        raw[1] === 0x50 &&
-        raw[2] === 0x56 &&
-        raw[3] === 0x31
-      ) {
-        ws.meta.nextCameraFrameId = raw.readUInt32BE(4);
-        return;
-      }
-
-      const frameId = ws.meta.nextCameraFrameId;
-      ws.meta.nextCameraFrameId = null;
+      const frameId = ++ws.meta.cameraFrameSequence;
 
       const isJpeg =
         raw.length >= 4 &&

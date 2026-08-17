@@ -589,19 +589,12 @@ void sendCloudFrame() {
   }
 
   const size_t frameBytes = fb->len;
-  const uint32_t frameId = ++cloudFrameSequence;
-  uint8_t frameHeader[8] = {
-    'F', 'P', 'V', '1',
-    (uint8_t)(frameId >> 24),
-    (uint8_t)(frameId >> 16),
-    (uint8_t)(frameId >> 8),
-    (uint8_t)frameId,
-  };
-  const bool headerSent = webSocket.sendBIN(frameHeader, sizeof(frameHeader));
-  const bool sent = headerSent && webSocket.sendBIN(fb->buf, frameBytes);
+  const uint32_t frameId = cloudFrameSequence + 1;
+  const bool sent = webSocket.sendBIN(fb->buf, frameBytes);
   esp_camera_fb_return(fb);
 
   if (sent) {
+    cloudFrameSequence = frameId;
     cloudFrameInFlight = true;
     cloudFrameInFlightId = frameId;
     cloudFrameSentAt = millis();
@@ -617,6 +610,7 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
     wsConnected = true;
     cloudFrameInFlight = false;
     cloudFrameInFlightId = 0;
+    cloudFrameSequence = 0;
     Serial.print("Camera WebSocket connected: ");
     Serial.print(config.wsScheme);
     Serial.print("://");

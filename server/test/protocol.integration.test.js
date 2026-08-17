@@ -354,7 +354,7 @@ test("binary camera frames relay without base64 encoding", async () => {
   }
 });
 
-test("binary camera frame acknowledgements preserve the frame ID", async () => {
+test("binary camera frame acknowledgements use a monotonic frame ID", async () => {
   const vehicleId = `test-camera-frame-id-${Date.now()}`;
   const url = `ws://127.0.0.1:${serverPort}`;
   const camera = await connectClient(url);
@@ -371,15 +371,9 @@ test("binary camera frame acknowledgements preserve the frame ID", async () => {
     });
     await waitForMessage(controller, (msg) => msg.type === "ack");
 
-    const frameId = 42;
-    const header = Buffer.alloc(8);
-    header.write("FPV1", 0, "ascii");
-    header.writeUInt32BE(frameId, 4);
-    camera.send(header, { binary: true });
-
     const frameAck = waitForMessage(
       camera,
-      (msg) => msg.type === "camera_frame_ack" && msg.frameId === frameId
+      (msg) => msg.type === "camera_frame_ack" && msg.frameId === 1
     );
     camera.send(
       Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x01, 0xff, 0xd9]),
@@ -388,7 +382,7 @@ test("binary camera frame acknowledgements preserve the frame ID", async () => {
 
     const ack = await frameAck;
     assert.equal(ack.accepted, true);
-    assert.equal(ack.frameId, frameId);
+    assert.equal(ack.frameId, 1);
   } finally {
     camera.close();
     controller.close();
