@@ -14,7 +14,6 @@ ESP32-CAM ──────────┘                    └─ JPEG camer
 - `server/` — Node.js WebSocket relay
 - `firmware/` — firmware รถและกล้อง
 - `docs/AZURE_LINUX_VM_TH.md` — deployment หลักบน Azure Linux VM
-- `docs/DIGITALOCEAN_DROPLET.md` — deployment ทางเลือก
 
 Azure App Service ไม่ได้ใช้งานแล้ว โปรเจกต์ production ใช้ Linux VM เครื่องเดียว โดย Nginx ส่ง `/` ไปเว็บและ `/ws` ไป relay
 
@@ -60,4 +59,3 @@ npm.cmd run build --prefix rc-car-control
 ระบบออกแบบให้รันบน Azure Linux VM ด้วย PM2 และ Nginx ดูขั้นตอนทั้งหมดใน [คู่มือ Azure Linux VM](docs/AZURE_LINUX_VM_TH.md)
 
 VM อาจถูก deallocate เพื่อหยุดค่า compute เมื่อไม่ได้ใช้งาน หลังเปิด VM ควรตรวจ `pm2 status`, Nginx และ `/health` ก่อนทดสอบรถ
-

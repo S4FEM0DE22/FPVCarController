@@ -10,14 +10,14 @@ export interface UseVehicleSocketOptions {
   onMessage?: (message: import("@/types/socket").IncomingMessage) => void;
 }
 
-const RECONNECT_BASE_DELAY_MS = 1000;
-const RECONNECT_MAX_DELAY_MS = 30000;
+const RECONNECT_BASE_DELAY_MS = 750;
+const RECONNECT_MAX_DELAY_MS = 15000;
 const RECONNECT_JITTER_RATIO = 0.3;
 const MAX_OUTBOUND_QUEUE_SIZE = 200;
-const HEARTBEAT_PONG_TIMEOUT_MS = 15000;
-const HEARTBEAT_PING_INTERVAL_MS = 5000;
-const ACK_TIMEOUT_MS = 3000;
-const ACK_MAX_RETRIES = 2;
+const HEARTBEAT_PONG_TIMEOUT_MS = 45000;
+const HEARTBEAT_PING_INTERVAL_MS = 10000;
+const ACK_TIMEOUT_MS = 5000;
+const ACK_MAX_RETRIES = 3;
 
 function withJitter(delayMs: number) {
   const jitter = delayMs * RECONNECT_JITTER_RATIO;

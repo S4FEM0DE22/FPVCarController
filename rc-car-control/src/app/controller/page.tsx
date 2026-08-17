@@ -162,7 +162,7 @@ export default function ControllerPage() {
   });
 
   const connectionModalKey = `${connectionState}:${reconnectAttempts}`;
-  const showConnectionModal =
+  const showConnectionNotice =
     (connectionState === "DISCONNECTED" || connectionState === "ERROR") &&
     dismissedConnectionKey !== connectionModalKey;
 
@@ -612,52 +612,52 @@ export default function ControllerPage() {
         deviceLogs={deviceLogs}
       />
 
-      {showConnectionModal && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4 backdrop-blur-sm">
-          <section className="w-full max-w-md rounded-3xl border border-slate-200/70 bg-white/95 p-6 shadow-lg backdrop-blur-xl">
-            <div className="flex items-center gap-3">
-              <span className="inline-flex h-3 w-3 rounded-full bg-rose-500" />
-              <h2 className="text-lg font-semibold text-slate-900">Connection Lost</h2>
-            </div>
-
-            <p className="mt-3 text-sm text-slate-600">
-              {lastError || `State: ${connectionState}`}
-            </p>
-
-            {reconnectAttempts > 0 && (
-              <p className="mt-2 rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600">
-                Reconnection attempt {reconnectAttempts}...
+      {showConnectionNotice && (
+        <section className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-40 w-[min(92vw,34rem)] -translate-x-1/2 rounded-2xl border border-rose-200/80 bg-white/95 p-3 text-slate-900 shadow-[0_18px_55px_rgba(15,23,42,0.22)] backdrop-blur-xl sm:right-4 sm:left-auto sm:w-[24rem] sm:translate-x-0">
+          <div className="flex items-start gap-3">
+            <span className="mt-1 inline-flex h-2.5 w-2.5 shrink-0 rounded-full bg-rose-500" />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold text-slate-950">Connection Lost</h2>
+                {reconnectAttempts > 0 && (
+                  <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[10px] font-semibold text-rose-700">
+                    retry {reconnectAttempts}
+                  </span>
+                )}
+              </div>
+              <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-600">
+                {lastError || `State: ${connectionState}`}
               </p>
-            )}
-
-            <div className="mt-5 flex flex-wrap gap-2">
-              <button
-                onClick={() => {
-                  setShowSettings(true);
-                }}
-                className="flex-1 rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-              >
-                Settings
-              </button>
-              <button
-                onClick={() => {
-                  setDismissedConnectionKey(connectionModalKey);
-                }}
-                className="flex-1 rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-              >
-                Dismiss
-              </button>
-              <button
-                onClick={() => {
-                  handleSystemAction("NETWORK_RECONNECT");
-                }}
-                className="flex-1 rounded-full border border-emerald-300 bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-600"
-              >
-                Reconnect Now
-              </button>
             </div>
-          </section>
-        </div>
+          </div>
+
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            <button
+              onClick={() => {
+                setShowSettings(true);
+              }}
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+            >
+              Settings
+            </button>
+            <button
+              onClick={() => {
+                setDismissedConnectionKey(connectionModalKey);
+              }}
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+            >
+              Hide
+            </button>
+            <button
+              onClick={() => {
+                handleSystemAction("NETWORK_RECONNECT");
+              }}
+              className="rounded-xl border border-emerald-300 bg-emerald-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-emerald-600"
+            >
+              Reconnect
+            </button>
+          </div>
+        </section>
       )}
     </main>
   );

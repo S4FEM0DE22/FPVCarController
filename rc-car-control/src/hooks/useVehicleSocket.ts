@@ -98,8 +98,13 @@ export default function useVehicleSocket(
       setLastPongAgeMs(age);
 
       if (age > HEARTBEAT_PONG_TIMEOUT_MS) {
+        if (document.visibilityState === "hidden") {
+          lastPongAtRef.current = now;
+          return;
+        }
+
         const ws = wsRef.current;
-        setLastError("Heartbeat timeout: pong not received within 15s");
+        setLastError("Heartbeat timeout: pong not received within 45s");
         socketLogger.warn("heartbeat timeout", { ageMs: age });
         ws?.close(4000, "heartbeat timeout");
       }
@@ -374,8 +379,39 @@ export default function useVehicleSocket(
     shouldReconnectRef.current = true;
     connect();
 
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        lastPongAtRef.current = Date.now();
+        setLastPongAgeMs(0);
+
+        const ws = wsRef.current;
+        if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+          connect();
+        } else if (ws.readyState === WebSocket.OPEN) {
+          sendRaw(buildPingMessage());
+        }
+      }
+    };
+
+    const handleOnline = () => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) connect();
+    };
+
+    const handleOffline = () => {
+      setConnectionState("DISCONNECTED");
+      setLastError("Device network is offline");
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
     return () => {
       shouldReconnectRef.current = false;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
       clearTimers();
       reconnectAttemptRef.current = 0;
       setReconnectAttempts(0);
@@ -387,7 +423,7 @@ export default function useVehicleSocket(
         wsRef.current = null;
       }
     };
-  }, [connect, clearPendingAckTimers, clearTimers]);
+  }, [connect, clearPendingAckTimers, clearTimers, sendRaw]);
 
   return {
     connectionState,

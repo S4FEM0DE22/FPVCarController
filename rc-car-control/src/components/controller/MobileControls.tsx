@@ -112,7 +112,7 @@ export default function MobileControls({
       document.body.style.overflow = "hidden";
       document.documentElement.style.overflow = "hidden";
     }
-    document.body.style.touchAction = "none";
+    document.body.style.touchAction = desktop ? "none" : "manipulation";
 
     return () => {
       document.body.style.overflow = prevBodyOverflow;

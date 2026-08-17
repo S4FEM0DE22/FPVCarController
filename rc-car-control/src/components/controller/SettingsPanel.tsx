@@ -6,6 +6,7 @@ import {
   normalizeSoftCodeProfile,
   SOFT_CODE_PRESETS,
 } from "@/lib/softCodeProfile";
+import { NETWORK_CONFIG } from "@/constants/network";
 import type { VehicleSoftCodeProfile } from "@/types/control";
 import type {
   ControllerAlertRules,
@@ -70,12 +71,16 @@ export default function SettingsPanel({
 
   const [ssid, setSsid] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
   const [confirmAction, setConfirmAction] = useState<ConfirmActionState | null>(null);
   const [profileDraft, setProfileDraft] = useState<VehicleSoftCodeProfile>(softCodeProfile);
   const [profileError, setProfileError] = useState("");
   const [activeTab, setActiveTab] = useState<SettingsTab>("network");
+  const cloudUrl = NETWORK_CONFIG.cloudUrl || "Local / custom WebSocket";
+  const wsUrl = NETWORK_CONFIG.wsUrl;
+  const networkReady = ssid.trim().length > 0;
 
   useEffect(() => {
     if (!open) return;
@@ -87,11 +92,18 @@ export default function SettingsPanel({
 
   const handleWifiSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const nextSsid = ssid.trim();
+
+    if (!nextSsid) {
+      setMessage("กรุณาใส่ชื่อ Wi-Fi หรือ Hotspot ก่อนส่งค่า");
+      return;
+    }
+
     setSubmitting(true);
     setMessage("");
 
     try {
-      await onChangeWifi(ssid, password);
+      await onChangeWifi(nextSsid, password);
       setMessage("ส่งค่า WiFi ไปที่ ESP32 และ ESP32-CAM แล้ว");
       setPassword("");
     } catch {
@@ -239,18 +251,40 @@ export default function SettingsPanel({
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
           {activeTab === "network" ? (
             <>
+              <div className="rounded-2xl border border-sky-200/70 bg-sky-50/80 p-3 text-sky-950 sm:p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold">Cloud Connection</h3>
+                  <span className="rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-sky-800">
+                    {NETWORK_CONFIG.cloudUrl ? "Cloud mode" : "Local mode"}
+                  </span>
+                </div>
+                <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+                  <div className="rounded-xl bg-white/70 px-3 py-2">
+                    <p className="font-semibold uppercase tracking-[0.16em] text-sky-500">Controller URL</p>
+                    <p className="mt-1 break-all font-medium text-slate-800">{cloudUrl}</p>
+                  </div>
+                  <div className="rounded-xl bg-white/70 px-3 py-2">
+                    <p className="font-semibold uppercase tracking-[0.16em] text-sky-500">WebSocket</p>
+                    <p className="mt-1 break-all font-medium text-slate-800">{wsUrl}</p>
+                  </div>
+                </div>
+              </div>
+
               <form
                 onSubmit={handleWifiSubmit}
                 className="rounded-2xl glass-chip p-3 sm:p-4"
               >
                 <h3 className="mb-3 text-sm font-semibold text-neutral-800">
-                  Change WiFi for ESP32 + ESP32-CAM
+                  Change Wi-Fi for ESP32 + ESP32-CAM
                 </h3>
+                <p className="mb-3 text-xs leading-5 text-slate-500">
+                  ใส่ชื่อ Wi-Fi/Hotspot ที่ต้องการให้ทั้งสองบอร์ดใช้ร่วมกัน หลังส่งค่าอาจ offline สั้น ๆ ระหว่างเปลี่ยนเครือข่าย
+                </p>
 
                 <div className="space-y-3">
                   <div>
                     <label className="mb-1 block text-xs text-neutral-500">
-                      SSID
+                      Wi-Fi / Hotspot Name
                     </label>
                     <input
                       value={ssid}
@@ -261,11 +295,20 @@ export default function SettingsPanel({
                   </div>
 
                   <div>
-                    <label className="mb-1 block text-xs text-neutral-500">
-                      Password
-                    </label>
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <label className="block text-xs text-neutral-500">
+                        Password
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword((prev) => !prev)}
+                        className="rounded-lg border border-white/50 bg-white/60 px-2 py-1 text-[11px] font-semibold text-slate-600"
+                      >
+                        {showPassword ? "Hide" : "Show"}
+                      </button>
+                    </div>
                     <input
-                      type="password"
+                      type={showPassword ? "text" : "password"}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder="รหัสผ่าน WiFi"
@@ -273,9 +316,13 @@ export default function SettingsPanel({
                     />
                   </div>
 
+                  <div className="rounded-xl border border-amber-200/70 bg-amber-50/80 px-3 py-2 text-xs leading-5 text-amber-950">
+                    ถ้าเปลี่ยน Wi-Fi แล้วรถไม่กลับมาออนไลน์ ให้เปิด setup mode แล้วตั้งค่าใหม่ผ่าน FPV-Car-Setup
+                  </div>
+
                   <button
                     type="submit"
-                    disabled={submitting || !ssid.trim()}
+                    disabled={submitting || !networkReady}
                     className="w-full rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {submitting ? "กำลังส่ง..." : "Send WiFi to Both Boards"}
