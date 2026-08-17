@@ -1,11 +1,23 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import {
+  Activity,
+  Camera,
+  CarFront,
+  Cloud,
+  Maximize2,
+  Settings2,
+} from "lucide-react";
 
 import CameraPanel from "@/components/controller/CameraPanel";
 import ControllerInsightsModal from "@/components/controller/ControllerInsightsModal";
 import MobileControls from "@/components/controller/MobileControls";
+import MobileOverviewPanel from "@/components/controller/MobileOverviewPanel";
+import OperatorStatusPanel from "@/components/controller/OperatorStatusPanel";
 import SettingsPanel from "@/components/controller/SettingsPanel";
+import TelemetryTrendStrip from "@/components/controller/TelemetryTrendStrip";
+import TouchControlDeck from "@/components/controller/TouchControlDeck";
 import useControllerInputHandlers from "@/hooks/useControllerInputHandlers";
 import useControllerLayout from "@/hooks/useControllerLayout";
 import useControllerPreferences, {
@@ -18,14 +30,6 @@ import useIsMobile from "@/hooks/useIsMobile";
 import useKeyboardControl from "@/hooks/useKeyboardControl";
 import useVehicleController from "@/hooks/useVehicleController";
 import { NETWORK_CONFIG } from "@/constants/network";
-import {
-  driveStateLabel,
-  formatCameraAim,
-  latencyTone,
-  powerLabel,
-  pressedKeysLabel,
-  trackPowerFromCommand,
-} from "@/components/controller/controlPanelDisplay";
 import {
   DEFAULT_SOFT_CODE_PROFILE,
   normalizeSoftCodeProfile,
@@ -67,8 +71,14 @@ export default function ControllerPage() {
     handleTouchAction,
     handleSystemAction,
     handleEmergencyStop,
+    cameraOrientation,
     cameraFrameSrc,
+    cameraOnline,
     deviceLogs,
+    wifiNetworks,
+    wifiScanState,
+    wifiScanError,
+    requestWifiScan,
   } = useVehicleController();
 
   const {
@@ -93,6 +103,7 @@ export default function ControllerPage() {
     alertRules,
     watchdog,
     connectionState,
+    vehicleOnline: telemetry.online,
     lastCommand,
     lastAction,
     latency,
@@ -167,28 +178,6 @@ export default function ControllerPage() {
     dismissedConnectionKey !== connectionModalKey;
 
   const profileName = telemetry.behaviorProfile?.name || softCodeProfile.name;
-  const trackPower = trackPowerFromCommand(lastCommand);
-  const vehicleStateLabel = telemetry.online
-    ? telemetry.vehicleState.toUpperCase()
-    : "OFFLINE";
-  const connectionTone =
-    connectionState === "CONNECTED"
-      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-      : connectionState === "CONNECTING"
-      ? "border-amber-200 bg-amber-50 text-amber-700"
-      : "border-rose-200 bg-rose-50 text-rose-700";
-  const batteryTone =
-    telemetry.battery > 45
-      ? "text-emerald-700"
-      : telemetry.battery > 20
-      ? "text-amber-600"
-      : "text-rose-600";
-  const wifiTone =
-    telemetry.wifi > -65
-      ? "text-emerald-700"
-      : telemetry.wifi > -78
-      ? "text-amber-600"
-      : "text-rose-600";
 
   const handleSharedWifiChange = async (ssid: string, password: string) => {
     handleSystemAction("WIFI_SET", { ssid, password });
@@ -216,22 +205,22 @@ export default function ControllerPage() {
   };
 
   const controlGuide = [
-    { label: "Move", value: "W / A / S / D", hint: "Keyboard drive" },
-    { label: "Camera", value: "Arrow Keys", hint: "Pan / tilt" },
-    { label: "Stop", value: "Space", hint: "Emergency stop" },
-    { label: "Utility", value: "H / L / R / X", hint: "Horn, light, reset, camera" },
+    { label: "ขับรถ", value: "W / A / S / D", hint: "เดินหน้า ถอย และเลี้ยว" },
+    { label: "หันกล้อง", value: "Arrow Keys", hint: "ซ้าย ขวา ก้ม และเงย" },
+    { label: "หยุดฉุกเฉิน", value: "Space", hint: "หยุดคำสั่งขับทันที" },
+    { label: "คำสั่งเสริม", value: "H / L / R / X", hint: "แตร ไฟ กลางกล้อง และเปิดกล้อง" },
   ];
   const gamepadGuide = [
-    { label: "Drive", value: "Left Stick", hint: "Throttle and steering" },
-    { label: "Camera", value: "Right Stick / D-Pad", hint: "Pan and tilt" },
-    { label: "Actions", value: "A / B / X / Y", hint: "Horn, light, camera, reset" },
-    { label: "Stop", value: "Menu", hint: "Emergency stop" },
+    { label: "ขับรถ", value: "Left Stick", hint: "คันเร่งและเลี้ยว" },
+    { label: "หันกล้อง", value: "Right Stick / D-Pad", hint: "ซ้าย ขวา ก้ม และเงย" },
+    { label: "คำสั่งเสริม", value: "A / B / X / Y", hint: "แตร ไฟ กล้อง และรีเซ็ต" },
+    { label: "หยุดฉุกเฉิน", value: "Menu", hint: "หยุดคำสั่งขับทันที" },
   ];
   const touchGuide = [
-    { label: "Drive", value: "Left Pad", hint: "Hold and drag" },
-    { label: "Camera", value: "Right Pad", hint: "Pan and tilt" },
-    { label: "Actions", value: "Bottom Bar", hint: "Horn, light, camera" },
-    { label: "Stop", value: "STOP", hint: "Emergency stop" },
+    { label: "ขับรถ", value: "จอยซ้าย", hint: "แตะค้างแล้วลาก" },
+    { label: "หันกล้อง", value: "จอยขวา", hint: "ซ้าย ขวา ก้ม และเงย" },
+    { label: "คำสั่งเสริม", value: "แถบปุ่ม", hint: "แตร ไฟ กล้อง และรีเซ็ต" },
+    { label: "หยุดฉุกเฉิน", value: "STOP", hint: "หยุดคำสั่งขับทันที" },
   ];
   const activeControlGuide =
     inputMode === "gamepad"
@@ -240,62 +229,35 @@ export default function ControllerPage() {
       ? touchGuide
       : controlGuide;
   const activeAlert = runtimeToasts[0];
-  const cameraPanDeg = telemetry.cameraPan;
-  const cameraTiltDeg = telemetry.cameraTilt;
-  const cameraAim = formatCameraAim(cameraPanDeg, cameraTiltDeg);
+  const cameraPanDeg = cameraOrientation.pan;
+  const cameraTiltDeg = cameraOrientation.tilt;
   const actionPressed = lastActionAt > 0 && inputClock - lastActionAt < 900;
-  const activeInputState = [
-    {
-      label: "Drive",
-      value: lastCommand,
-      active: lastCommand !== "STOP",
-      state: lastCommand !== "STOP" ? "Holding" : "Idle",
-    },
-    {
-      label: "Move Keys",
-      value: pressedKeysLabel(lastCommand),
-      active: lastCommand !== "STOP",
-      state: lastCommand !== "STOP" ? "Holding" : "Idle",
-    },
-    {
-      label: "Camera",
-      value: lastAction.startsWith("CAM_") ? lastAction : "-",
-      active: actionPressed && lastAction.startsWith("CAM_"),
-      state: actionPressed && lastAction.startsWith("CAM_") ? "Pressed" : "Idle",
-    },
-    {
-      label: "Utility",
-      value: ["HORN", "LIGHT_TOGGLE", "CAMERA_TOGGLE"].includes(lastAction)
-        ? lastAction
-        : "-",
-      active: actionPressed && ["HORN", "LIGHT_TOGGLE", "CAMERA_TOGGLE"].includes(lastAction),
-      state:
-        actionPressed && ["HORN", "LIGHT_TOGGLE", "CAMERA_TOGGLE"].includes(lastAction)
-          ? "Pressed"
-          : "Idle",
-    },
-  ];
 
   return (
     <main
-      className={`relative h-dvh w-screen bg-slate-950 text-slate-950 ${
-        !isMobile && !fullscreenMode ? "overflow-y-auto overflow-x-hidden" : "overflow-hidden"
+      className={`relative h-dvh w-screen bg-[#e8edf1] text-slate-950 ${
+        fullscreenMode ? "overflow-hidden" : "overflow-y-auto overflow-x-hidden"
       }`}
     >
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_10%_12%,rgba(13,148,136,0.22),transparent_26%),radial-gradient(circle_at_90%_8%,rgba(245,158,11,0.2),transparent_22%),linear-gradient(180deg,rgba(255,255,255,0.12),rgba(255,255,255,0))]" />
-
-      {isMobile ? (
+      {isMobile && fullscreenMode ? (
         <MobileControls
           onTouchCommand={handleTouchMoveWithTuning}
           onAction={handleTouchActionWithTuning}
           onStop={handleEmergencyStop}
-          onOpenSettings={() => setShowSettings(true)}
-          onOpenInfo={() => setShowInsights(true)}
+          onOpenSettings={() => {
+            setFullscreenMode(false);
+            setShowSettings(true);
+          }}
+          onOpenInfo={() => {
+            setFullscreenMode(false);
+            setShowInsights(true);
+          }}
           cameraOn={telemetry.cameraOn}
           lightOn={telemetry.lightOn}
           streamUrl={cameraStreamUrl}
           frameSrc={cameraFrameSrc}
           connectionState={connectionState}
+          vehicleOnline={telemetry.online}
           battery={telemetry.battery}
           wifi={telemetry.wifi}
           latency={latency}
@@ -303,51 +265,53 @@ export default function ControllerPage() {
           cameraTilt={cameraTiltDeg}
           lastCommand={lastCommand}
           lastAction={lastAction}
-          lastActionAt={lastActionAt}
           actionPressed={actionPressed}
           desktop={isLandscape}
-          persistentControls={isLandscape}
+          persistentControls
           landscape={isLandscape}
           alertMessage={activeAlert?.message}
           alertLevel={activeAlert?.level}
           inputMode={inputMode}
           externalPressedQuickAction={externalPressedQuickAction}
+          onExitFullscreen={() => setFullscreenMode(false)}
         />
       ) : (
         <section
-          className={`relative mx-auto flex max-w-[1800px] flex-col gap-3 px-3 py-3 lg:px-5 lg:py-5 ${
-            fullscreenMode ? "h-full" : "min-h-dvh"
+          className={`relative flex flex-col ${
+            fullscreenMode
+              ? "h-full w-full gap-0 p-0"
+              : "mx-auto min-h-dvh max-w-[1680px] gap-3 p-2.5 sm:p-3 lg:p-4"
           }`}
         >
           {!fullscreenMode && (
-            <header className="rounded-[1.75rem] border border-white/72 bg-white/86 px-4 py-4 shadow-[0_18px_40px_rgba(15,23,42,0.10)] backdrop-blur-xl lg:px-5">
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <header className="sticky top-0 z-30 rounded-lg border border-slate-200 bg-white/95 p-2.5 shadow-sm backdrop-blur-md sm:p-3">
+              <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-500">
-                    Dashboard
-                  </p>
-                  <div className="mt-1 flex flex-wrap items-center gap-2">
-                    <h1 className="text-2xl font-semibold tracking-[-0.05em] text-slate-950 sm:text-3xl">
-                      FPV Car Control Center
-                    </h1>
-                  </div>
-                  <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-600">
-                    หน้าควบคุมรถแบบ stage-first ที่เน้นภาพกล้องเป็นศูนย์กลาง และย้ายสถานะสำคัญไปไว้บนจอภาพโดยตรง
-                  </p>
+                  <p className="text-[9px] font-bold uppercase text-slate-500">FPV CAR / CAR-001</p>
+                  <h1 className="truncate text-base font-bold text-slate-950 sm:text-lg">ศูนย์ควบคุมรถ</h1>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-                  <button
-                    onClick={() => setShowInsights(true)}
-                    className="rounded-2xl border border-white/70 bg-white/85 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm backdrop-blur transition hover:-translate-y-0.5 hover:bg-white"
-                  >
-                    Insights
+                <div className="hidden min-w-0 flex-1 items-center justify-center gap-1.5 lg:flex">
+                  <span className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-bold ${connectionState === "CONNECTED" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : connectionState === "CONNECTING" ? "border-amber-200 bg-amber-50 text-amber-800" : "border-rose-200 bg-rose-50 text-rose-800"}`}>
+                    <Cloud size={13} /> Cloud {connectionState === "CONNECTED" ? "เชื่อมแล้ว" : connectionState === "CONNECTING" ? "กำลังเชื่อม" : "หลุด"}
+                  </span>
+                  <span className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-bold ${telemetry.online ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-slate-50 text-slate-600"}`}>
+                    <CarFront size={13} /> รถ {telemetry.online ? "ออนไลน์" : "ออฟไลน์"}
+                  </span>
+                  <span className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-bold ${cameraOnline ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-slate-50 text-slate-600"}`}>
+                    <Camera size={13} /> ESP32-CAM {cameraOnline ? "ออนไลน์" : "ออฟไลน์"}
+                  </span>
+                </div>
+
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <button onClick={() => setShowInsights(true)} className="grid h-9 w-9 place-items-center rounded-md border border-slate-200 bg-slate-50 text-slate-700 transition hover:bg-slate-100" title="ดู Insights" aria-label="ดู Insights">
+                    <Activity size={17} />
                   </button>
-                  <button
-                    onClick={() => setShowSettings((prev) => !prev)}
-                    className="rounded-2xl border border-white/70 bg-white/85 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm backdrop-blur transition hover:-translate-y-0.5 hover:bg-white"
-                  >
-                    {showSettings ? "Hide Settings" : "Settings"}
+                  <button onClick={() => setShowSettings(true)} className="grid h-9 w-9 place-items-center rounded-md border border-slate-200 bg-slate-50 text-slate-700 transition hover:bg-slate-100" title="เปิดการตั้งค่า" aria-label="เปิดการตั้งค่า">
+                    <Settings2 size={17} />
+                  </button>
+                  <button onClick={() => setFullscreenMode(true)} className="flex h-9 items-center gap-1.5 rounded-md bg-slate-950 px-2.5 text-[10px] font-bold text-white transition hover:bg-slate-800" title="เข้าโหมดเต็มจอ">
+                    <Maximize2 size={16} /> <span className="hidden sm:inline">เต็มจอ</span>
                   </button>
                 </div>
               </div>
@@ -359,204 +323,120 @@ export default function ControllerPage() {
               className={
                 fullscreenMode
                   ? "grid min-h-0 gap-3"
-                  : "grid min-h-0 gap-3 xl:grid-cols-[minmax(0,1fr)_23rem]"
+                  : isMobile
+                  ? "grid min-h-0 items-start gap-3"
+                  : "grid min-h-0 items-start gap-3 lg:grid-cols-[minmax(0,1fr)_22rem] xl:grid-cols-[minmax(0,1fr)_24rem]"
               }
             >
-              <CameraPanel
-                isMobile={false}
-                cameraEnabled={telemetry.cameraOn}
-                streamUrl={cameraStreamUrl}
-                frameSrc={cameraFrameSrc}
-                lastCommand={lastCommand}
-                lastAction={lastAction}
-                actionPressed={actionPressed}
-                cameraPan={cameraPanDeg}
-                cameraTilt={cameraTiltDeg}
-                fullscreen
-                connectionState={connectionState}
-                vehicleOnline={telemetry.online}
-                battery={telemetry.battery}
-                wifi={telemetry.wifi}
-                latency={latency}
-                profileName={profileName}
-                fullscreenMode={fullscreenMode}
-                onToggleFullscreen={() => setFullscreenMode((prev) => !prev)}
-                onEmergencyStop={handleEmergencyStop}
-                lastError={lastError}
-                cameraOn={telemetry.cameraOn}
-                lightOn={telemetry.lightOn}
-                onHorn={() => handleSystemAction("HORN")}
-                onLightToggle={() => handleSystemAction("LIGHT_TOGGLE")}
-                onCameraReset={() => handleSystemAction("CAM_RESET")}
-                onCameraToggle={() => handleSystemAction("CAMERA_TOGGLE")}
-                externalPressedQuickAction={externalPressedQuickAction}
-                inputModeLabel={inputMode.toUpperCase()}
-                controlGuideItems={activeControlGuide}
-              />
+              <div className={`min-h-0 min-w-0 ${
+                fullscreenMode
+                  ? "h-full"
+                  : isMobile
+                  ? "mobile-embedded-controller grid content-start gap-3"
+                  : "grid content-start gap-3"
+              }`}>
+                <CameraPanel
+                  isMobile={isMobile}
+                  cameraEnabled={telemetry.cameraOn}
+                  streamUrl={cameraStreamUrl}
+                  frameSrc={cameraFrameSrc}
+                  lastCommand={lastCommand}
+                  lastAction={lastAction}
+                  actionPressed={actionPressed}
+                  cameraPan={cameraPanDeg}
+                  cameraTilt={cameraTiltDeg}
+                  fullscreen
+                  connectionState={connectionState}
+                  vehicleOnline={telemetry.online}
+                  battery={telemetry.battery}
+                  wifi={telemetry.wifi}
+                  latency={latency}
+                  profileName={profileName}
+                  fullscreenMode={fullscreenMode}
+                  onToggleFullscreen={() => setFullscreenMode((prev) => !prev)}
+                  onEmergencyStop={handleEmergencyStop}
+                  lastError={lastError}
+                  cameraOn={telemetry.cameraOn}
+                  lightOn={telemetry.lightOn}
+                  onHorn={() => handleSystemAction("HORN")}
+                  onLightToggle={() => handleSystemAction("LIGHT_TOGGLE")}
+                  onCameraReset={() => handleSystemAction("CAM_RESET")}
+                  onCameraToggle={() => handleSystemAction("CAMERA_TOGGLE")}
+                  externalPressedQuickAction={externalPressedQuickAction}
+                  inputModeLabel={inputMode.toUpperCase()}
+                  controlGuideItems={activeControlGuide}
+                />
+
+                {isMobile && !fullscreenMode && (
+                  <TouchControlDeck
+                    inputMode={inputMode}
+                    cameraOn={telemetry.cameraOn}
+                    lightOn={telemetry.lightOn}
+                    onMove={handleTouchMoveWithTuning}
+                    onAction={handleTouchActionWithTuning}
+                    onStop={handleEmergencyStop}
+                    sideBySide={isLandscape}
+                    externalPressedQuickAction={externalPressedQuickAction}
+                  />
+                )}
+
+                {!isMobile && !fullscreenMode && (
+                  <TelemetryTrendStrip
+                    connectionState={connectionState}
+                    vehicleOnline={telemetry.online}
+                    latency={latency}
+                    battery={telemetry.battery}
+                    wifi={telemetry.wifi}
+                    latencySamples={latencySamples}
+                    batterySamples={batterySamples}
+                    wifiSamples={wifiSamples}
+                  />
+                )}
+              </div>
 
               {!fullscreenMode && (
-                <aside className="grid min-h-0 gap-3 xl:grid-rows-[auto_auto_minmax(0,1fr)]">
-                  <section className="rounded-2xl border border-white/72 bg-white/88 p-4 shadow-[0_18px_40px_rgba(15,23,42,0.10)] backdrop-blur-xl">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">
-                          Vehicle Status
-                        </p>
-                        <h2 className="mt-1 text-lg font-semibold text-slate-950">
-                          {vehicleStateLabel}
-                        </h2>
-                      </div>
-                      <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-wide ${connectionTone}`}>
-                        {connectionState}
-                      </span>
-                    </div>
-
-                    <div className="mt-4 grid grid-cols-2 gap-2">
-                      <div className="rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-2">
-                        <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">Battery</p>
-                        <p className={`mt-1 text-base font-semibold ${batteryTone}`}>{telemetry.battery}%</p>
-                      </div>
-                      <div className="rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-2">
-                        <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">WiFi</p>
-                        <p className={`mt-1 text-base font-semibold ${wifiTone}`}>{telemetry.wifi} dBm</p>
-                      </div>
-                      <div className="rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-2">
-                        <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">Latency</p>
-                        <p className={`mt-1 text-base font-semibold ${latencyTone(latency)}`}>{latency ?? "-"} ms</p>
-                      </div>
-                      <div className="rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-2">
-                        <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">Profile</p>
-                        <p className="mt-1 truncate text-base font-semibold text-slate-900">{profileName}</p>
-                      </div>
-                    </div>
-                    <div className="mt-3 rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-2">
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">
-                          Camera Aim
-                        </p>
-                        <div className="text-right">
-                          <p className="text-sm font-semibold text-slate-900">
-                            {cameraAim.compact}
-                          </p>
-                          <p className="mt-0.5 text-[11px] font-medium text-slate-500">
-                            Pan {cameraAim.panDeg} deg / Tilt {cameraAim.tiltDeg} deg
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                    {activeAlert && (
-                      <div
-                        className={`mt-3 rounded-xl border px-3 py-2 text-xs font-semibold ${
-                          activeAlert.level === "warn"
-                            ? "border-amber-200 bg-amber-50 text-amber-900"
-                            : "border-sky-200 bg-sky-50 text-sky-900"
-                        }`}
-                      >
-                        {activeAlert.message}
-                      </div>
-                    )}
-                  </section>
-
-                  <section className="rounded-2xl border border-white/72 bg-white/88 p-4 shadow-[0_18px_40px_rgba(15,23,42,0.10)] backdrop-blur-xl">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">
-                      Drive Output
-                    </p>
-                    <div className="mt-3 space-y-3">
-                      <div>
-                        <div className="mb-1 flex items-center justify-between text-xs font-semibold text-slate-600">
-                          <span>Left Track</span>
-                          <span>{powerLabel(trackPower.left)}</span>
-                        </div>
-                        <div className="h-2 overflow-hidden rounded-full bg-slate-200">
-                          <div
-                            className="h-full rounded-full bg-emerald-500 transition-all"
-                            style={{ width: `${Math.abs(trackPower.left)}%` }}
-                          />
-                        </div>
-                      </div>
-                      <div>
-                        <div className="mb-1 flex items-center justify-between text-xs font-semibold text-slate-600">
-                          <span>Right Track</span>
-                          <span>{powerLabel(trackPower.right)}</span>
-                        </div>
-                        <div className="h-2 overflow-hidden rounded-full bg-slate-200">
-                          <div
-                            className="h-full rounded-full bg-sky-500 transition-all"
-                            style={{ width: `${Math.abs(trackPower.right)}%` }}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
-                      <div className="rounded-xl bg-slate-50 px-3 py-2">
-                        <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">Drive</p>
-                        <p className="mt-1 font-semibold text-slate-900">
-                          {driveStateLabel(trackPower.left, trackPower.right)}
-                        </p>
-                      </div>
-                      <div className="rounded-xl bg-slate-50 px-3 py-2">
-                        <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">Input</p>
-                        <p className="mt-1 font-semibold text-slate-900">{pressedKeysLabel(lastCommand)}</p>
-                      </div>
-                    </div>
-
-                    <div className="mt-3 rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-2">
-                      <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                        Input State
-                      </p>
-                      <div className="mt-2 grid grid-cols-2 gap-2">
-                        {activeInputState.map((item) => (
-                          <div
-                            key={item.label}
-                            className={`rounded-lg border px-2.5 py-2 ${
-                              item.active
-                                ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                                : "border-slate-200 bg-white text-slate-500"
-                            }`}
-                          >
-                            <p className="text-[10px] font-semibold uppercase tracking-[0.14em]">
-                              {item.label}
-                            </p>
-                            <p className="mt-1 truncate text-xs font-semibold">
-                              {item.value}
-                            </p>
-                            <p className="mt-0.5 text-[10px] font-medium">
-                              {item.state}
-                            </p>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </section>
-
-                  <section className="min-h-0 rounded-2xl border border-white/72 bg-white/88 p-4 shadow-[0_18px_40px_rgba(15,23,42,0.10)] backdrop-blur-xl">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">
-                        Control Guide
-                      </p>
-                      <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[10px] font-semibold text-slate-600">
-                        {inputMode.toUpperCase()}
-                      </span>
-                    </div>
-
-                    <div className="mt-3 grid gap-2">
-                      {activeControlGuide.map((item) => (
-                        <div
-                          key={item.label}
-                          className="flex items-center justify-between gap-3 rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-2"
-                        >
-                          <div>
-                            <p className="text-xs font-semibold text-slate-900">{item.label}</p>
-                            <p className="text-[11px] text-slate-500">{item.hint}</p>
-                          </div>
-                          <span className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700">
-                            {item.value}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
+                <aside className="min-h-0">
+                  {isMobile ? (
+                    <MobileOverviewPanel
+                      connectionState={connectionState}
+                      vehicleOnline={telemetry.online}
+                      cameraOn={telemetry.cameraOn}
+                      cameraOnline={cameraOnline}
+                      battery={telemetry.battery}
+                      wifi={telemetry.wifi}
+                      latency={latency}
+                      cameraPan={cameraPanDeg}
+                      cameraTilt={cameraTiltDeg}
+                      lastCommand={lastCommand}
+                      lastAction={lastAction}
+                      actionPressed={actionPressed}
+                      inputMode={inputMode}
+                      guideItems={activeControlGuide}
+                      alertMessage={activeAlert?.message}
+                      alertLevel={activeAlert?.level}
+                    />
+                  ) : (
+                    <OperatorStatusPanel
+                      connectionState={connectionState}
+                      vehicleOnline={telemetry.online}
+                      vehicleState={telemetry.vehicleState}
+                      cameraOn={telemetry.cameraOn}
+                      cameraOnline={cameraOnline}
+                      battery={telemetry.battery}
+                      wifi={telemetry.wifi}
+                      latency={latency}
+                      profileName={profileName}
+                      cameraPan={cameraPanDeg}
+                      cameraTilt={cameraTiltDeg}
+                      lastCommand={lastCommand}
+                      lastAction={lastAction}
+                      actionPressed={actionPressed}
+                      inputMode={inputMode}
+                      guideItems={activeControlGuide}
+                      alertMessage={activeAlert?.message}
+                      alertLevel={activeAlert?.level}
+                    />
+                  )}
                 </aside>
               )}
             </div>
@@ -568,6 +448,11 @@ export default function ControllerPage() {
         open={showSettings && !fullscreenMode}
         onClose={() => setShowSettings(false)}
         onChangeWifi={handleSharedWifiChange}
+        vehicleOnline={telemetry.online}
+        wifiNetworks={wifiNetworks}
+        wifiScanState={wifiScanState}
+        wifiScanError={wifiScanError}
+        onScanWifi={requestWifiScan}
         onReconnectVehicle={async () => {
           handleSystemAction("NETWORK_RECONNECT");
         }}
@@ -612,16 +497,16 @@ export default function ControllerPage() {
         deviceLogs={deviceLogs}
       />
 
-      {showConnectionNotice && (
-        <section className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-40 w-[min(92vw,34rem)] -translate-x-1/2 rounded-2xl border border-rose-200/80 bg-white/95 p-3 text-slate-900 shadow-[0_18px_55px_rgba(15,23,42,0.22)] backdrop-blur-xl sm:right-4 sm:left-auto sm:w-[24rem] sm:translate-x-0">
+      {showConnectionNotice && !fullscreenMode && (
+        <section className="fixed top-[4.75rem] left-1/2 z-40 w-[min(92vw,32rem)] -translate-x-1/2 rounded-lg border border-rose-200 bg-white/96 p-3 text-slate-900 shadow-lg backdrop-blur-md lg:top-auto lg:right-4 lg:bottom-4 lg:left-auto lg:w-[23rem] lg:translate-x-0">
           <div className="flex items-start gap-3">
             <span className="mt-1 inline-flex h-2.5 w-2.5 shrink-0 rounded-full bg-rose-500" />
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-2">
-                <h2 className="text-sm font-semibold text-slate-950">Connection Lost</h2>
+                <h2 className="text-sm font-semibold text-slate-950">การเชื่อมต่อ Cloud หลุด</h2>
                 {reconnectAttempts > 0 && (
                   <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[10px] font-semibold text-rose-700">
-                    retry {reconnectAttempts}
+                    ลองใหม่ {reconnectAttempts}
                   </span>
                 )}
               </div>
@@ -638,7 +523,7 @@ export default function ControllerPage() {
               }}
               className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
             >
-              Settings
+              ตั้งค่า
             </button>
             <button
               onClick={() => {
@@ -646,7 +531,7 @@ export default function ControllerPage() {
               }}
               className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
             >
-              Hide
+              ซ่อน
             </button>
             <button
               onClick={() => {
@@ -654,7 +539,7 @@ export default function ControllerPage() {
               }}
               className="rounded-xl border border-emerald-300 bg-emerald-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-emerald-600"
             >
-              Reconnect
+              เชื่อมใหม่
             </button>
           </div>
         </section>

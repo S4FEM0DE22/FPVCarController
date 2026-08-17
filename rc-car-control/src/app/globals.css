@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 :root {
-  --background: #f5f1ea;
+  --background: #e8edf1;
   --foreground: #102033;
 }
 
@@ -18,28 +18,12 @@ html {
 }
 
 body {
-  background:
-    radial-gradient(circle at 12% 12%, rgba(13, 148, 136, 0.24), transparent 28%),
-    radial-gradient(circle at 88% 14%, rgba(245, 158, 11, 0.20), transparent 24%),
-    radial-gradient(circle at 50% 108%, rgba(15, 23, 42, 0.16), transparent 40%),
-    linear-gradient(180deg, #fbfaf7 0%, #f4efe6 48%, #ecf2f3 100%);
+  background: linear-gradient(180deg, #eef2f5 0%, #e2e8ec 100%);
   color: var(--foreground);
   font-family: "Segoe UI", Arial, sans-serif;
   color-scheme: light;
   -webkit-font-smoothing: antialiased;
   text-rendering: geometricPrecision;
-}
-
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    linear-gradient(rgba(16, 32, 51, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(16, 32, 51, 0.03) 1px, transparent 1px);
-  background-size: 72px 72px;
-  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.75), transparent 92%);
 }
 
 .glass-surface {
@@ -98,6 +82,42 @@ body::before {
   overflow: hidden;
   background: #020617;
   touch-action: none;
+}
+
+.mobile-embedded-camera {
+  height: clamp(16rem, 55vw, 26rem);
+  min-height: 16rem;
+}
+
+.touch-control-deck {
+  container-type: inline-size;
+}
+
+.touch-control-actions {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+@container (max-width: 15rem) {
+  .touch-control-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .touch-stop-button {
+    grid-column: span 2;
+  }
+}
+
+@media (orientation: landscape) and (max-width: 1179px) {
+  .mobile-embedded-controller {
+    grid-template-columns: minmax(0, 1.6fr) minmax(14rem, 1fr);
+    align-items: stretch;
+  }
+
+  .mobile-embedded-camera {
+    height: clamp(17rem, calc(100dvh - 6.5rem), 32rem);
+    min-height: 0;
+  }
 }
 
 .video {

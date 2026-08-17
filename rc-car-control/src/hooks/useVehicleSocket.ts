@@ -30,6 +30,7 @@ export default function useVehicleSocket(
   const heartbeatTimerRef = useRef<number | null>(null);
   const shouldReconnectRef = useRef(true);
   const onMessageRef = useRef(options?.onMessage);
+  const onCameraFrameRef = useRef(options?.onCameraFrame);
   const reconnectAttemptRef = useRef(0);
   const outboundQueueRef = useRef<OutgoingMessage[]>([]);
   const pendingAckRef = useRef<Map<string, PendingAckEntry>>(new Map());
@@ -46,7 +47,8 @@ export default function useVehicleSocket(
 
   useEffect(() => {
     onMessageRef.current = options?.onMessage;
-  }, [options?.onMessage]);
+    onCameraFrameRef.current = options?.onCameraFrame;
+  }, [options?.onCameraFrame, options?.onMessage]);
 
   const updateQueueSize = useCallback(() => {
     setOutboundQueueSize(outboundQueueRef.current.length);
@@ -304,6 +306,7 @@ export default function useVehicleSocket(
 
     try {
       const ws = new WebSocket(NETWORK_CONFIG.wsUrl);
+      ws.binaryType = "arraybuffer";
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -321,6 +324,11 @@ export default function useVehicleSocket(
       };
 
       ws.onmessage = (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          onCameraFrameRef.current?.(event.data);
+          return;
+        }
+
         try {
           const data = JSON.parse(event.data) as IncomingMessage;
 

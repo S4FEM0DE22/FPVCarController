@@ -70,17 +70,22 @@ Default TB6612FNG pins are declared at the top of the sketch. Change them to mat
 <control_url>?cam=http://<camera-ip>/stream
 ```
 
-The web app stores this camera URL in `localStorage`, so it keeps working after refresh on desktop, phone, and tablet. When cloud WebSocket settings are configured, the ESP32-CAM also publishes JPEG frames to the relay as `camera_frame` messages so the Azure-hosted controller can show the camera without loading the local `http://<camera-ip>/stream` URL.
+The web app stores this camera URL in `localStorage`, so it keeps working after refresh on desktop, phone, and tablet. When cloud WebSocket settings are configured, the ESP32-CAM publishes JPEG frames directly as binary WebSocket messages. The camera waits for a `camera_frame_ack` before capturing the next cloud frame, while the relay and browser keep only the newest frame. This prevents delayed JPEG frames from building up when the connection slows down. With PSRAM, the cloud profile uses VGA (`640x480`), JPEG quality `14`, two frame buffers, and a target interval of `140 ms`; without PSRAM it falls back to QVGA.
+
+Deploy the updated relay and web app before flashing this ESP32-CAM firmware. The new firmware expects frame acknowledgements from the relay. The relay remains compatible with the older JSON/Base64 camera frame format during migration.
 
 ## Shared Wi-Fi From The Web App
 
 The controller page can change Wi-Fi for both boards from one form:
 
+- The web app sends `WIFI_SCAN` through the cloud relay. The ESP32 scans nearby 2.4 GHz networks and returns SSID, signal strength, channel, and security status for the selection list.
 - ESP32 vehicle receives `WIFI_SET` through the existing WebSocket `action` channel.
 - ESP32-CAM receives the same SSID/password through `POST http://<camera-ip>/api/wifi`.
 - Both boards save the new Wi-Fi to Preferences, so the next boot uses the new network automatically.
 
 This works best when the web controller, ESP32, and ESP32-CAM are reachable on the same LAN. If the controller is served over HTTPS, browsers may block calls to an `http://` ESP32-CAM address as mixed content; for local demos, use the controller over `http://<computer-lan-ip>:3000/controller`.
+
+Deploy the updated relay and flash the updated `esp32-vehicle.ino` before using the scan list. Older relay or firmware versions do not understand `wifi_scan_result`.
 
 ## Vehicle Tuning
 

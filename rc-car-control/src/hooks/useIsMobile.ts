@@ -7,7 +7,9 @@ export default function useIsMobile() {
 
   useEffect(() => {
     const update = () => {
-      setIsMobile(window.innerWidth < 1024);
+      const tabletWidth = window.innerWidth < 1180;
+      const touchFirstDevice = window.matchMedia("(pointer: coarse)").matches;
+      setIsMobile(tabletWidth || (touchFirstDevice && window.innerWidth <= 1366));
     };
 
     update();

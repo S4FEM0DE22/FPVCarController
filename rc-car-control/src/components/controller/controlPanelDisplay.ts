@@ -51,12 +51,13 @@ function formatAxisOffset(
   value: number,
   center: number,
   positiveLabel: string,
-  negativeLabel: string
+  negativeLabel: string,
+  centerLabel: string
 ) {
   const offset = Math.round(value - center);
 
-  if (offset === 0) return "Center";
-  return `${offset > 0 ? positiveLabel : negativeLabel} ${Math.abs(offset)} deg`;
+  if (offset === 0) return `${centerLabel} 0°`;
+  return `${offset > 0 ? positiveLabel : negativeLabel} ${Math.abs(offset)}°`;
 }
 
 export function formatCameraAim(pan: number, tilt: number) {
@@ -66,8 +67,20 @@ export function formatCameraAim(pan: number, tilt: number) {
   const tiltOffsetDeg = Math.round(tiltServoDeg - CAMERA_TILT_CENTER_DEG);
   const panDeg = Math.abs(panOffsetDeg);
   const tiltDeg = Math.abs(tiltOffsetDeg);
-  const panLabel = formatAxisOffset(panServoDeg, CAMERA_PAN_CENTER_DEG, "Left", "Right");
-  const tiltLabel = formatAxisOffset(tiltServoDeg, CAMERA_TILT_CENTER_DEG, "Up", "Down");
+  const panLabel = formatAxisOffset(
+    panServoDeg,
+    CAMERA_PAN_CENTER_DEG,
+    "ซ้าย",
+    "ขวา",
+    "ตรง"
+  );
+  const tiltLabel = formatAxisOffset(
+    tiltServoDeg,
+    CAMERA_TILT_CENTER_DEG,
+    "เงย",
+    "ก้ม",
+    "ระดับ"
+  );
 
   return {
     panDeg,
@@ -78,8 +91,8 @@ export function formatCameraAim(pan: number, tilt: number) {
     tiltOffsetDeg,
     panLabel,
     tiltLabel,
-    summary: `Pan ${panDeg} deg (${panLabel}) / Tilt ${tiltDeg} deg (${tiltLabel})`,
-    compact: `${panLabel} / ${tiltLabel}`,
+    summary: `มุมหัน ${panLabel} · มุมก้มเงย ${tiltLabel}`,
+    compact: `หัน ${panLabel} · ${tiltLabel}`,
   };
 }
 
@@ -106,11 +119,6 @@ export function trackPowerFromCommand(command: string): { left: number; right: n
   }
 }
 
-export function powerLabel(value: number) {
-  if (value === 0) return "0% (Stop)";
-  return `${value > 0 ? "+" : ""}${value}% (${value > 0 ? "Forward" : "Backward"})`;
-}
-
 export function driveStateLabel(left: number, right: number) {
   if (left === 0 && right === 0) return "Stop";
   if (left > 0 && right > 0 && left === right) return "Forward";
@@ -122,18 +130,4 @@ export function driveStateLabel(left: number, right: number) {
   if (left < 0 && right < 0 && left > right) return "Backward Left";
   if (left < 0 && right < 0 && left < right) return "Backward Right";
   return "Mixed";
-}
-
-export function latencyTone(latency: number | null | undefined, scheme: "light" | "dark" = "light") {
-  if (scheme === "dark") {
-    if (latency == null) return "text-slate-300";
-    if (latency < 50) return "text-emerald-300";
-    if (latency < 150) return "text-amber-300";
-    return "text-rose-300";
-  }
-
-  if (latency == null) return "text-slate-500";
-  if (latency < 50) return "text-emerald-700";
-  if (latency < 150) return "text-amber-600";
-  return "text-rose-600";
 }

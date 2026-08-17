@@ -15,9 +15,10 @@ import type {
   ControlCommand,
   VehicleTelemetry,
 } from "@/types/control";
-import type { IncomingMessage } from "@/types/socket";
+import type { IncomingMessage, WifiNetwork } from "@/types/socket";
 
 type StatusState = "waiting" | "offline" | "moving" | "idle" | "error";
+export type WifiScanState = "idle" | "scanning" | "ready" | "error";
 export interface DeviceLogEntry {
   id: number;
   ts: number;
@@ -26,10 +27,18 @@ export interface DeviceLogEntry {
   message: string;
 }
 
-const CAMERA_ORIENTATION_STORAGE_KEY = "controller.camera-orientation.v1";
 const CAMERA_PAN_CENTER = 95;
 const CAMERA_TILT_CENTER = 64;
 const MAX_DEVICE_LOGS = 120;
+const WIFI_SCAN_TIMEOUT_MS = 20000;
+const CAMERA_CONFIRM_TIMEOUT_MS = 1800;
+const CAMERA_POSITION_ACTIONS = new Set<ActionCommand>([
+  "CAM_LEFT",
+  "CAM_RIGHT",
+  "CAM_UP",
+  "CAM_DOWN",
+  "CAM_RESET",
+]);
 
 const initialTelemetry: VehicleTelemetry = {
   vehicleId: VEHICLE_CONFIG.id,
@@ -50,23 +59,26 @@ const initialTelemetry: VehicleTelemetry = {
   vehicleState: "offline",
 };
 
-function readPersistedCameraOrientation(): CameraOrientation {
-  if (typeof window === "undefined") {
-    return { pan: CAMERA_PAN_CENTER, tilt: CAMERA_TILT_CENTER };
-  }
+function normalizeWifiNetworks(networks: WifiNetwork[]) {
+  const strongestBySsid = new Map<string, WifiNetwork>();
 
-  try {
-    const raw = window.localStorage.getItem(CAMERA_ORIENTATION_STORAGE_KEY);
-    if (!raw) return { pan: CAMERA_PAN_CENTER, tilt: CAMERA_TILT_CENTER };
-    const parsed = JSON.parse(raw) as Partial<CameraOrientation>;
+  for (const network of networks) {
+    const ssid = typeof network.ssid === "string" ? network.ssid.trim() : "";
+    if (!ssid) continue;
 
-    return {
-      pan: typeof parsed.pan === "number" ? parsed.pan : CAMERA_PAN_CENTER,
-      tilt: typeof parsed.tilt === "number" ? parsed.tilt : CAMERA_TILT_CENTER,
+    const normalized: WifiNetwork = {
+      ssid,
+      rssi: Number.isFinite(network.rssi) ? network.rssi : -100,
+      channel: Number.isFinite(network.channel) ? network.channel : 0,
+      secure: Boolean(network.secure),
     };
-  } catch {
-    return { pan: CAMERA_PAN_CENTER, tilt: CAMERA_TILT_CENTER };
+    const current = strongestBySsid.get(ssid);
+    if (!current || normalized.rssi > current.rssi) {
+      strongestBySsid.set(ssid, normalized);
+    }
   }
+
+  return [...strongestBySsid.values()].sort((a, b) => b.rssi - a.rssi);
 }
 
 export default function useVehicleController() {
@@ -82,11 +94,100 @@ export default function useVehicleController() {
   });
   const [telemetry, setTelemetry] = useState<VehicleTelemetry>(initialTelemetry);
   const [cameraFrameSrc, setCameraFrameSrc] = useState("");
+  const [cameraOnline, setCameraOnline] = useState(false);
   const [deviceLogs, setDeviceLogs] = useState<DeviceLogEntry[]>([]);
+  const [wifiNetworks, setWifiNetworks] = useState<WifiNetwork[]>([]);
+  const [wifiScanState, setWifiScanState] = useState<WifiScanState>("idle");
+  const [wifiScanError, setWifiScanError] = useState("");
   const lastSentKeyRef = useRef<string>("");
-  const hasRestoredCameraOrientationRef = useRef(false);
   const pendingToggleActionsRef = useRef<Set<string>>(new Set());
   const pendingToggleTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const wifiScanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingCameraUntilRef = useRef(0);
+  const cameraFrameUrlRef = useRef("");
+  const pendingCameraFrameRef = useRef<ArrayBuffer | null>(null);
+  const cameraFrameDecodingRef = useRef(false);
+  const cameraDecoderRef = useRef<HTMLImageElement | null>(null);
+  const cameraDecoderUrlRef = useRef("");
+  const cameraFrameDisposedRef = useRef(false);
+
+  const replaceCameraFrame = useCallback((nextSrc: string) => {
+    const previousSrc = cameraFrameUrlRef.current;
+    cameraFrameUrlRef.current = nextSrc;
+    setCameraFrameSrc(nextSrc);
+
+    if (previousSrc.startsWith("blob:")) {
+      window.setTimeout(() => URL.revokeObjectURL(previousSrc), 1000);
+    }
+  }, []);
+
+  const decodeLatestCameraFrame = useCallback(function decodeLatestFrame() {
+    if (cameraFrameDecodingRef.current || cameraFrameDisposedRef.current) return;
+
+    const frame = pendingCameraFrameRef.current;
+    if (!frame) return;
+
+    pendingCameraFrameRef.current = null;
+    cameraFrameDecodingRef.current = true;
+
+    const nextUrl = URL.createObjectURL(new Blob([frame], { type: "image/jpeg" }));
+    const decoder = new Image();
+    decoder.decoding = "async";
+    cameraDecoderRef.current = decoder;
+    cameraDecoderUrlRef.current = nextUrl;
+
+    const finish = (publish: boolean) => {
+      decoder.onload = null;
+      decoder.onerror = null;
+      cameraDecoderRef.current = null;
+      cameraDecoderUrlRef.current = "";
+
+      if (publish && !cameraFrameDisposedRef.current) {
+        replaceCameraFrame(nextUrl);
+      } else {
+        URL.revokeObjectURL(nextUrl);
+      }
+
+      cameraFrameDecodingRef.current = false;
+      if (pendingCameraFrameRef.current && !cameraFrameDisposedRef.current) {
+        window.queueMicrotask(decodeLatestFrame);
+      }
+    };
+
+    decoder.onload = () => finish(true);
+    decoder.onerror = () => finish(false);
+    decoder.src = nextUrl;
+  }, [replaceCameraFrame]);
+
+  const handleBinaryCameraFrame = useCallback(
+    (frame: ArrayBuffer) => {
+      setCameraOnline(true);
+      pendingCameraFrameRef.current = frame;
+      decodeLatestCameraFrame();
+    },
+    [decodeLatestCameraFrame]
+  );
+
+  useEffect(() => {
+    cameraFrameDisposedRef.current = false;
+
+    return () => {
+      cameraFrameDisposedRef.current = true;
+      pendingCameraFrameRef.current = null;
+      const decoder = cameraDecoderRef.current;
+      if (decoder) {
+        decoder.onload = null;
+        decoder.onerror = null;
+        decoder.src = "";
+      }
+      if (cameraDecoderUrlRef.current) {
+        URL.revokeObjectURL(cameraDecoderUrlRef.current);
+      }
+      if (cameraFrameUrlRef.current.startsWith("blob:")) {
+        URL.revokeObjectURL(cameraFrameUrlRef.current);
+      }
+    };
+  }, []);
 
   const handleSocketMessage = useCallback((message: IncomingMessage) => {
     if (message.type === "telemetry") {
@@ -94,10 +195,27 @@ export default function useVehicleController() {
         typeof message.cameraPan === "number" ? message.cameraPan : undefined;
       const reportedCameraTilt = message.cameraTilt;
 
-      setCameraOrientation((prev) => ({
-        pan: reportedCameraPan ?? prev.pan,
-        tilt: reportedCameraTilt,
-      }));
+      setCameraOrientation((prev) => {
+        const next = {
+          pan: reportedCameraPan ?? prev.pan,
+          tilt: reportedCameraTilt,
+        };
+        const telemetryMatchesTarget =
+          Math.abs(next.pan - prev.pan) < 0.5 &&
+          Math.abs(next.tilt - prev.tilt) < 0.5;
+
+        if (
+          Date.now() < pendingCameraUntilRef.current &&
+          !telemetryMatchesTarget
+        ) {
+          return prev;
+        }
+
+        if (telemetryMatchesTarget) {
+          pendingCameraUntilRef.current = 0;
+        }
+        return next;
+      });
 
       setTelemetry((prev) => {
         const nextOnline = message.online;
@@ -135,7 +253,13 @@ export default function useVehicleController() {
     }
 
     if (message.type === "camera_frame") {
-      setCameraFrameSrc(`data:image/${message.format || "jpeg"};base64,${message.data}`);
+      setCameraOnline(true);
+      replaceCameraFrame(`data:image/${message.format || "jpeg"};base64,${message.data}`);
+    }
+
+    if (message.type === "camera_status") {
+      setCameraOnline(message.online);
+      if (!message.online) replaceCameraFrame("");
     }
 
     if (message.type === "device_log") {
@@ -149,6 +273,18 @@ export default function useVehicleController() {
         },
         ...prev,
       ].slice(0, MAX_DEVICE_LOGS));
+    }
+
+    if (message.type === "wifi_scan_result") {
+      if (wifiScanTimeoutRef.current) {
+        clearTimeout(wifiScanTimeoutRef.current);
+        wifiScanTimeoutRef.current = null;
+      }
+
+      const networks = normalizeWifiNetworks(message.networks);
+      setWifiNetworks(networks);
+      setWifiScanError(message.error || "");
+      setWifiScanState(message.error ? "error" : "ready");
     }
 
     if (message.type === "status") {
@@ -178,7 +314,7 @@ export default function useVehicleController() {
       setStatusState("error");
       setStatusMessage(message.message);
     }
-  }, []);
+  }, [replaceCameraFrame]);
 
   const {
     connectionState,
@@ -191,6 +327,7 @@ export default function useVehicleController() {
     sendRaw,
   } = useVehicleSocket({
     onMessage: handleSocketMessage,
+    onCameraFrame: handleBinaryCameraFrame,
   });
 
   const handleMove = useCallback(
@@ -230,6 +367,10 @@ export default function useVehicleController() {
       source: ControlSource,
       payload?: Record<string, unknown>
     ) => {
+      if (CAMERA_POSITION_ACTIONS.has(action)) {
+        pendingCameraUntilRef.current = Date.now() + CAMERA_CONFIRM_TIMEOUT_MS;
+      }
+
       handleVehicleAction(
         {
           setLastCommand,
@@ -304,35 +445,25 @@ export default function useVehicleController() {
     [handleAction]
   );
 
+  const requestWifiScan = useCallback(() => {
+    if (wifiScanTimeoutRef.current) {
+      clearTimeout(wifiScanTimeoutRef.current);
+    }
+
+    setWifiScanState("scanning");
+    setWifiScanError("");
+    handleAction("WIFI_SCAN", CONTROL_SOURCE.system);
+
+    wifiScanTimeoutRef.current = setTimeout(() => {
+      setWifiScanState("error");
+      setWifiScanError("ESP32 ไม่ส่งผลการสแกนกลับมาภายในเวลาที่กำหนด");
+      wifiScanTimeoutRef.current = null;
+    }, WIFI_SCAN_TIMEOUT_MS);
+  }, [handleAction]);
+
   const handleEmergencyStop = useCallback(() => {
     handleMove("STOP", CONTROL_SOURCE.system, { throttle: 0, steering: 0 });
   }, [handleMove]);
-
-  useEffect(() => {
-    if (hasRestoredCameraOrientationRef.current) return;
-    hasRestoredCameraOrientationRef.current = true;
-
-    const restored = readPersistedCameraOrientation();
-    // Run after hydration to keep initial server/client markup identical.
-    const timer = window.setTimeout(() => {
-      setCameraOrientation(restored);
-    }, 0);
-
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        CAMERA_ORIENTATION_STORAGE_KEY,
-        JSON.stringify(cameraOrientation)
-      );
-    } catch {
-      // Ignore storage write failures.
-    }
-  }, [cameraOrientation]);
 
   useEffect(() => {
     const handlePageHide = () => {
@@ -401,17 +532,24 @@ export default function useVehicleController() {
       if (pendingToggleTimeout) {
         clearTimeout(pendingToggleTimeout);
       }
+      if (wifiScanTimeoutRef.current) {
+        clearTimeout(wifiScanTimeoutRef.current);
+      }
     };
   }, []);
 
   return {
     telemetry,
     deviceLogs,
+    wifiNetworks,
+    wifiScanState,
+    wifiScanError,
     lastCommand,
     lastAction,
     lastActionAt,
     cameraOrientation,
     cameraFrameSrc,
+    cameraOnline,
     connectionState,
     latency,
     lastError,
@@ -427,6 +565,7 @@ export default function useVehicleController() {
     handleTouchMove,
     handleTouchAction,
     handleSystemAction,
+    requestWifiScan,
     handleEmergencyStop,
   };
 }

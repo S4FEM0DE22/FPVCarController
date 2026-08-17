@@ -2,12 +2,29 @@
 
 import { useEffect, useState } from "react";
 import {
+  CarFront,
+  Cloud,
+  Eye,
+  EyeOff,
+  Check,
+  LockKeyhole,
+  Power,
+  Radio,
+  RefreshCw,
+  SlidersHorizontal,
+  Wifi,
+  WifiOff,
+  X,
+} from "lucide-react";
+import {
   DEFAULT_SOFT_CODE_PROFILE,
   normalizeSoftCodeProfile,
   SOFT_CODE_PRESETS,
 } from "@/lib/softCodeProfile";
 import { NETWORK_CONFIG } from "@/constants/network";
 import type { VehicleSoftCodeProfile } from "@/types/control";
+import type { WifiNetwork } from "@/types/socket";
+import type { WifiScanState } from "@/hooks/useVehicleController";
 import type {
   ControllerAlertRules,
   ControllerTuningSettings,
@@ -18,6 +35,11 @@ interface SettingsPanelProps {
   open: boolean;
   onClose: () => void;
   onChangeWifi: (ssid: string, password: string) => Promise<void> | void;
+  vehicleOnline: boolean;
+  wifiNetworks: WifiNetwork[];
+  wifiScanState: WifiScanState;
+  wifiScanError: string;
+  onScanWifi: () => void;
   onReconnectVehicle: () => Promise<void> | void;
   onRebootVehicle: () => Promise<void> | void;
   onOpenWifiPortal: () => Promise<void> | void;
@@ -46,6 +68,11 @@ export default function SettingsPanel({
   open,
   onClose,
   onChangeWifi,
+  vehicleOnline,
+  wifiNetworks,
+  wifiScanState,
+  wifiScanError,
+  onScanWifi,
   onReconnectVehicle,
   onRebootVehicle,
   onOpenWifiPortal,
@@ -80,7 +107,22 @@ export default function SettingsPanel({
   const [activeTab, setActiveTab] = useState<SettingsTab>("network");
   const cloudUrl = NETWORK_CONFIG.cloudUrl || "Local / custom WebSocket";
   const wsUrl = NETWORK_CONFIG.wsUrl;
-  const networkReady = ssid.trim().length > 0;
+  const selectedNetwork = wifiNetworks.find((network) => network.ssid === ssid);
+  const networkReady =
+    vehicleOnline &&
+    Boolean(selectedNetwork) &&
+    (!selectedNetwork?.secure || password.length > 0);
+
+  useEffect(() => {
+    if (
+      open &&
+      activeTab === "network" &&
+      vehicleOnline &&
+      wifiScanState === "idle"
+    ) {
+      onScanWifi();
+    }
+  }, [activeTab, onScanWifi, open, vehicleOnline, wifiScanState]);
 
   useEffect(() => {
     if (!open) return;
@@ -95,7 +137,12 @@ export default function SettingsPanel({
     const nextSsid = ssid.trim();
 
     if (!nextSsid) {
-      setMessage("กรุณาใส่ชื่อ Wi-Fi หรือ Hotspot ก่อนส่งค่า");
+      setMessage("กรุณาเลือก Wi-Fi หรือ Hotspot จากรายการก่อนส่งค่า");
+      return;
+    }
+
+    if (selectedNetwork?.secure && !password) {
+      setMessage("กรุณาใส่รหัสผ่านของเครือข่ายที่เลือก");
       return;
     }
 
@@ -199,140 +246,270 @@ export default function SettingsPanel({
       onClick={onClose}
     >
       <section
-        className="glass-modal relative flex h-[calc(100dvh-1.5rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl p-4 text-neutral-900 sm:h-[min(44rem,calc(100dvh-2rem))] sm:rounded-3xl sm:p-6"
+        className="glass-modal relative flex h-[calc(100dvh-1.5rem)] w-full max-w-2xl flex-col overflow-hidden rounded-lg p-4 text-neutral-900 sm:h-[min(44rem,calc(100dvh-2rem))] sm:p-5"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex shrink-0 items-center justify-between gap-2 sm:mb-5">
-          <h2 className="text-base font-semibold sm:text-lg">Settings / Vehicle</h2>
+          <div>
+            <p className="text-[10px] font-bold uppercase text-slate-500">Vehicle configuration</p>
+            <h2 className="text-base font-bold sm:text-lg">ตั้งค่ารถ</h2>
+          </div>
           <button
             onClick={onClose}
-            className="rounded-xl border border-green-300 bg-green-50 px-3 py-1.5 text-xs font-medium text-neutral-700 transition hover:bg-green-100"
+            className="grid h-9 w-9 place-items-center rounded-md border border-slate-200 bg-white text-slate-700 transition hover:bg-slate-50"
+            title="ปิดหน้าตั้งค่า"
+            aria-label="ปิดหน้าตั้งค่า"
           >
-            ✕ Close
+            <X size={17} />
           </button>
         </div>
 
-        <div className="mb-4 flex shrink-0 gap-2 rounded-2xl border border-white/45 bg-white/45 p-1">
+        <div className="mb-4 flex shrink-0 gap-1 rounded-lg border border-slate-200 bg-slate-100 p-1">
           <button
             type="button"
             onClick={() => setActiveTab("network")}
-            className={`flex-1 rounded-xl px-3 py-2 text-sm font-semibold transition ${
+            className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-2 text-xs font-semibold transition ${
               activeTab === "network"
                 ? "bg-slate-950 text-white shadow-sm"
                 : "text-slate-600 hover:bg-white/70"
             }`}
           >
-            Network
+            <Wifi size={14} /> เครือข่าย
           </button>
           <button
             type="button"
             onClick={() => setActiveTab("control")}
-            className={`flex-1 rounded-xl px-3 py-2 text-sm font-semibold transition ${
+            className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-2 text-xs font-semibold transition ${
               activeTab === "control"
                 ? "bg-slate-950 text-white shadow-sm"
                 : "text-slate-600 hover:bg-white/70"
             }`}
           >
-            Control
+            <SlidersHorizontal size={14} /> การควบคุม
           </button>
           <button
             type="button"
             onClick={() => setActiveTab("vehicle")}
-            className={`flex-1 rounded-xl px-3 py-2 text-sm font-semibold transition ${
+            className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-2 text-xs font-semibold transition ${
               activeTab === "vehicle"
                 ? "bg-slate-950 text-white shadow-sm"
                 : "text-slate-600 hover:bg-white/70"
             }`}
           >
-            Vehicle
+            <CarFront size={14} /> ตัวรถ
           </button>
         </div>
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
           {activeTab === "network" ? (
             <>
-              <div className="rounded-2xl border border-sky-200/70 bg-sky-50/80 p-3 text-sky-950 sm:p-4">
+              <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sky-950">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h3 className="text-sm font-semibold">Cloud Connection</h3>
-                  <span className="rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-sky-800">
-                    {NETWORK_CONFIG.cloudUrl ? "Cloud mode" : "Local mode"}
+                  <div className="flex items-center gap-2">
+                    <Cloud size={17} />
+                    <div>
+                      <h3 className="text-sm font-semibold">ปลายทางควบคุม</h3>
+                      <p className="text-[10px] text-sky-700">เว็บส่งคำสั่งผ่าน WebSocket</p>
+                    </div>
+                  </div>
+                  <span className="rounded-md bg-white px-2 py-1 text-[10px] font-semibold text-sky-800">
+                    {NETWORK_CONFIG.cloudUrl ? "Cloud" : "ในเครื่อง"}
                   </span>
                 </div>
-                <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
-                  <div className="rounded-xl bg-white/70 px-3 py-2">
-                    <p className="font-semibold uppercase tracking-[0.16em] text-sky-500">Controller URL</p>
-                    <p className="mt-1 break-all font-medium text-slate-800">{cloudUrl}</p>
+                <details className="mt-3 rounded-md border border-sky-200 bg-white/70 px-3 py-2 text-xs">
+                  <summary className="cursor-pointer font-semibold text-sky-800">ดูรายละเอียดทางเทคนิค</summary>
+                  <div className="mt-2 space-y-2">
+                    <div>
+                      <p className="text-[10px] font-semibold uppercase text-sky-500">Controller URL</p>
+                      <p className="mt-0.5 break-all font-medium text-slate-800">{cloudUrl}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-semibold uppercase text-sky-500">WebSocket</p>
+                      <p className="mt-0.5 break-all font-medium text-slate-800">{wsUrl}</p>
+                    </div>
                   </div>
-                  <div className="rounded-xl bg-white/70 px-3 py-2">
-                    <p className="font-semibold uppercase tracking-[0.16em] text-sky-500">WebSocket</p>
-                    <p className="mt-1 break-all font-medium text-slate-800">{wsUrl}</p>
-                  </div>
-                </div>
+                </details>
               </div>
 
               <form
                 onSubmit={handleWifiSubmit}
-                className="rounded-2xl glass-chip p-3 sm:p-4"
+                className="rounded-lg border border-slate-200 bg-white p-3 sm:p-4"
               >
-                <h3 className="mb-3 text-sm font-semibold text-neutral-800">
-                  Change Wi-Fi for ESP32 + ESP32-CAM
-                </h3>
+                <div className="mb-1 flex items-center gap-2">
+                  <Wifi size={17} className="text-emerald-700" />
+                  <h3 className="text-sm font-semibold text-neutral-800">เปลี่ยน Wi-Fi ของรถ</h3>
+                </div>
                 <p className="mb-3 text-xs leading-5 text-slate-500">
-                  ใส่ชื่อ Wi-Fi/Hotspot ที่ต้องการให้ทั้งสองบอร์ดใช้ร่วมกัน หลังส่งค่าอาจ offline สั้น ๆ ระหว่างเปลี่ยนเครือข่าย
+                  ESP32 จะสแกนเครือข่ายที่อยู่ใกล้รถ เลือกชื่อจากรายการแล้วใส่รหัสผ่านเพียงครั้งเดียว
                 </p>
 
                 <div className="space-y-3">
                   <div>
-                    <label className="mb-1 block text-xs text-neutral-500">
-                      Wi-Fi / Hotspot Name
-                    </label>
-                    <input
-                      value={ssid}
-                      onChange={(e) => setSsid(e.target.value)}
-                      placeholder="เช่น HomeWiFi / PhoneHotspot"
-                      className="w-full rounded-2xl border border-white/40 bg-white/65 px-4 py-3 text-sm text-neutral-900 outline-none transition focus:border-emerald-400"
-                    />
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <label className="block text-xs font-medium text-neutral-600">
+                        1. เลือกเครือข่ายใกล้รถ
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSsid("");
+                          setPassword("");
+                          setMessage("");
+                          onScanWifi();
+                        }}
+                        disabled={!vehicleOnline || wifiScanState === "scanning"}
+                        className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 px-2.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <RefreshCw
+                          size={14}
+                          className={wifiScanState === "scanning" ? "animate-spin" : ""}
+                        />
+                        {wifiScanState === "scanning" ? "กำลังสแกน" : "สแกนใหม่"}
+                      </button>
+                    </div>
+
+                    {wifiScanState === "scanning" ? (
+                      <div className="grid min-h-24 place-items-center rounded-md border border-slate-200 bg-slate-50 text-center">
+                        <div>
+                          <RefreshCw size={20} className="mx-auto animate-spin text-emerald-600" />
+                          <p className="mt-2 text-xs text-slate-600">กำลังให้ ESP32 ค้นหาเครือข่าย...</p>
+                        </div>
+                      </div>
+                    ) : wifiNetworks.length > 0 ? (
+                      <>
+                        <div className="max-h-52 space-y-1.5 overflow-y-auto rounded-md border border-slate-200 bg-slate-50 p-1.5">
+                        {wifiNetworks.map((network) => {
+                          const selected = network.ssid === ssid;
+                          const signal =
+                            network.rssi >= -55
+                              ? "แรงมาก"
+                              : network.rssi >= -67
+                              ? "ดี"
+                              : network.rssi >= -75
+                              ? "พอใช้"
+                              : "อ่อน";
+
+                          return (
+                            <button
+                              key={network.ssid}
+                              type="button"
+                              aria-pressed={selected}
+                              onClick={() => {
+                                setSsid(network.ssid);
+                                setPassword("");
+                                setMessage("");
+                              }}
+                              className={`flex min-h-12 w-full items-center gap-3 rounded-md border px-3 py-2 text-left transition ${
+                                selected
+                                  ? "border-emerald-500 bg-emerald-50"
+                                  : "border-transparent bg-white hover:border-slate-200"
+                              }`}
+                            >
+                              <Wifi
+                                size={18}
+                                className={selected ? "text-emerald-700" : "text-slate-500"}
+                              />
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-sm font-semibold text-slate-900">
+                                  {network.ssid}
+                                </span>
+                                <span className="block text-[11px] text-slate-500">
+                                  {signal} · {network.rssi} dBm · ช่อง {network.channel || "—"}
+                                </span>
+                              </span>
+                              {network.secure && (
+                                <LockKeyhole size={14} className="shrink-0 text-slate-400" />
+                              )}
+                              {selected && <Check size={18} className="shrink-0 text-emerald-700" />}
+                            </button>
+                          );
+                        })}
+                        </div>
+                        {!vehicleOnline && (
+                          <div className="mt-2 flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-950">
+                            <WifiOff size={16} className="shrink-0" />
+                            รายการสแกนล่าสุดยังดูได้ แต่ต้องรอ ESP32 ออนไลน์ก่อนส่งค่า
+                          </div>
+                        )}
+                      </>
+                    ) : !vehicleOnline ? (
+                      <div className="flex min-h-24 items-center gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 text-sm text-amber-950">
+                        <WifiOff size={20} className="shrink-0" />
+                        <p>ESP32 ยังไม่ออนไลน์ จึงยังสแกน Wi-Fi รอบตัวรถไม่ได้</p>
+                      </div>
+                    ) : wifiScanState === "error" ? (
+                      <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-3 text-xs leading-5 text-rose-800">
+                        {wifiScanError || "สแกน Wi-Fi ไม่สำเร็จ กรุณาลองอีกครั้ง"}
+                      </div>
+                    ) : wifiScanState === "ready" ? (
+                      <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-xs leading-5 text-slate-600">
+                        ไม่พบ Wi-Fi หรือ Hotspot ใกล้รถ ลองเปิด Hotspot แล้วกดสแกนใหม่
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={onScanWifi}
+                        className="flex min-h-24 w-full items-center justify-center gap-2 rounded-md border border-dashed border-slate-300 bg-slate-50 text-sm font-semibold text-slate-700"
+                      >
+                        <Wifi size={18} /> สแกนหา Wi-Fi
+                      </button>
+                    )}
                   </div>
 
-                  <div>
+                  {selectedNetwork?.secure ? (
+                    <div>
                     <div className="mb-1 flex items-center justify-between gap-2">
                       <label className="block text-xs text-neutral-500">
-                        Password
+                        2. รหัสผ่านของ {selectedNetwork.ssid}
                       </label>
                       <button
                         type="button"
                         onClick={() => setShowPassword((prev) => !prev)}
-                        className="rounded-lg border border-white/50 bg-white/60 px-2 py-1 text-[11px] font-semibold text-slate-600"
+                        className="grid h-7 w-8 place-items-center rounded-md border border-slate-200 bg-slate-50 text-slate-600"
+                        title={showPassword ? "ซ่อนรหัสผ่าน" : "แสดงรหัสผ่าน"}
+                        aria-label={showPassword ? "ซ่อนรหัสผ่าน" : "แสดงรหัสผ่าน"}
                       >
-                        {showPassword ? "Hide" : "Show"}
+                        {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
                       </button>
                     </div>
                     <input
                       type={showPassword ? "text" : "password"}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      placeholder="รหัสผ่าน WiFi"
-                      className="w-full rounded-2xl border border-white/40 bg-white/65 px-4 py-3 text-sm text-neutral-900 outline-none transition focus:border-emerald-400"
+                      placeholder="ใส่รหัสผ่าน Wi-Fi"
+                      autoComplete="new-password"
+                      className="w-full rounded-md border border-slate-200 bg-white px-3 py-3 text-sm text-neutral-900 outline-none transition focus:border-emerald-400"
                     />
-                  </div>
+                    </div>
+                  ) : selectedNetwork ? (
+                    <div className="flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+                      <Check size={15} /> เครือข่ายนี้ไม่ต้องใช้รหัสผ่าน
+                    </div>
+                  ) : null}
 
-                  <div className="rounded-xl border border-amber-200/70 bg-amber-50/80 px-3 py-2 text-xs leading-5 text-amber-950">
-                    ถ้าเปลี่ยน Wi-Fi แล้วรถไม่กลับมาออนไลน์ ให้เปิด setup mode แล้วตั้งค่าใหม่ผ่าน FPV-Car-Setup
+                  <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-950">
+                    รถจะขาดการเชื่อมต่อชั่วคราว หากไม่กลับมาออนไลน์ ให้เข้า FPV-Car-Setup เพื่อตั้งค่าใหม่
                   </div>
 
                   <button
                     type="submit"
                     disabled={submitting || !networkReady}
-                    className="w-full rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="w-full rounded-md bg-emerald-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {submitting ? "กำลังส่ง..." : "Send WiFi to Both Boards"}
+                    {submitting
+                      ? "กำลังส่งค่า..."
+                      : !vehicleOnline
+                      ? "รอ ESP32 ออนไลน์"
+                      : selectedNetwork
+                      ? `ใช้ ${selectedNetwork.ssid} กับรถ`
+                      : "เลือก Wi-Fi ก่อน"}
                   </button>
                 </div>
               </form>
 
-              <div className="rounded-2xl glass-chip p-3 sm:p-4">
+              <div className="rounded-lg border border-slate-200 bg-white p-3 sm:p-4">
                 <h3 className="mb-3 text-sm font-semibold text-neutral-800">
-                  Vehicle Actions
+                  คำสั่งเครือข่ายเพิ่มเติม
                 </h3>
 
                 <div className="grid gap-3">
@@ -347,9 +524,9 @@ export default function SettingsPanel({
                       })
                     }
                     disabled={submitting}
-                    className="rounded-2xl border border-white/40 bg-white/65 px-4 py-3 text-sm font-medium text-neutral-700 transition hover:bg-white/80 disabled:opacity-50"
+                    className="flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-neutral-700 transition hover:bg-slate-100 disabled:opacity-50"
                   >
-                    Reconnect Vehicle Network
+                    <RefreshCw size={16} /> เชื่อมต่อเครือข่ายรถใหม่
                   </button>
 
                   <button
@@ -363,9 +540,9 @@ export default function SettingsPanel({
                       })
                     }
                     disabled={submitting}
-                    className="rounded-2xl border border-amber-200/50 bg-amber-400/15 px-4 py-3 text-sm font-medium text-amber-900 transition hover:bg-amber-400/25 disabled:opacity-50"
+                    className="flex items-center justify-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-900 transition hover:bg-amber-100 disabled:opacity-50"
                   >
-                    Open WiFi Setup Mode
+                    <Radio size={16} /> เปิดโหมด FPV-Car-Setup
                   </button>
 
                   <button
@@ -379,9 +556,9 @@ export default function SettingsPanel({
                       })
                     }
                     disabled={submitting}
-                    className="rounded-2xl border border-rose-200/50 bg-rose-400/15 px-4 py-3 text-sm font-medium text-rose-800 transition hover:bg-rose-400/25 disabled:opacity-50"
+                    className="flex items-center justify-center gap-2 rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-800 transition hover:bg-rose-100 disabled:opacity-50"
                   >
-                    Reboot Vehicle
+                    <Power size={16} /> รีสตาร์ตรถ
                   </button>
                 </div>
               </div>

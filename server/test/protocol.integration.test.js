@@ -143,6 +143,35 @@ function waitForMessage(ws, predicate, timeoutMs = MESSAGE_TIMEOUT_MS) {
   });
 }
 
+function waitForBinaryMessage(ws, timeoutMs = MESSAGE_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for binary websocket message"));
+    }, timeoutMs);
+
+    const onMessage = (raw, isBinary) => {
+      if (!isBinary) return;
+      cleanup();
+      resolve(Buffer.from(raw));
+    };
+
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      ws.off("message", onMessage);
+      ws.off("error", onError);
+    };
+
+    ws.on("message", onMessage);
+    ws.on("error", onError);
+  });
+}
+
 test.before(async () => {
   await startServer();
 });
@@ -283,6 +312,104 @@ test("telemetry broadcast delivers esp telemetry to controller", async () => {
     assert.equal(received.lightOn, telemetryPayload.lightOn);
     assert.equal(received.cameraTilt, telemetryPayload.cameraTilt);
     assert.equal(received.failure, telemetryPayload.failure);
+  } finally {
+    esp.close();
+    controller.close();
+  }
+});
+
+test("binary camera frames relay without base64 encoding", async () => {
+  const vehicleId = `test-camera-${Date.now()}`;
+  const url = `ws://127.0.0.1:${serverPort}`;
+  const camera = await connectClient(url);
+  const controller = await connectClient(url);
+
+  try {
+    sendJson(camera, { type: "identify", clientType: "esp-cam", vehicleId });
+    await waitForMessage(camera, (msg) => msg.type === "ack");
+
+    sendJson(controller, {
+      type: "identify",
+      clientType: "web-controller",
+      vehicleId,
+    });
+    await waitForMessage(
+      controller,
+      (msg) => msg.type === "ack" && /Controller registered/.test(msg.message)
+    );
+
+    const jpegFrame = Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x01, 0xff, 0xd9]);
+    const receivedFrame = waitForBinaryMessage(controller);
+    const frameAck = waitForMessage(
+      camera,
+      (msg) => msg.type === "camera_frame_ack"
+    );
+    camera.send(jpegFrame, { binary: true });
+
+    assert.deepEqual(await receivedFrame, jpegFrame);
+    assert.equal((await frameAck).accepted, true);
+  } finally {
+    camera.close();
+    controller.close();
+  }
+});
+
+test("wifi scan request and result travel between controller and esp", async () => {
+  const vehicleId = `test-wifi-scan-${Date.now()}`;
+  const url = `ws://127.0.0.1:${serverPort}`;
+  const esp = await connectClient(url);
+  const controller = await connectClient(url);
+
+  try {
+    sendJson(esp, { type: "identify", clientType: "esp", vehicleId });
+    await waitForMessage(esp, (msg) => msg.type === "ack");
+
+    sendJson(controller, {
+      type: "identify",
+      clientType: "web-controller",
+      vehicleId,
+    });
+    await waitForMessage(controller, (msg) => msg.type === "ack");
+
+    const commandId = `wifi-scan-${Date.now()}`;
+    sendJson(controller, {
+      type: "action",
+      vehicleId,
+      source: "system",
+      action: "WIFI_SCAN",
+      timestamp: Date.now(),
+      commandId,
+    });
+
+    const forwarded = await waitForMessage(
+      esp,
+      (msg) => msg.type === "action" && msg.commandId === commandId
+    );
+    assert.equal(forwarded.action, "WIFI_SCAN");
+
+    const resultPromise = waitForMessage(
+      controller,
+      (msg) => msg.type === "wifi_scan_result" && msg.requestId === commandId
+    );
+    sendJson(esp, {
+      type: "wifi_scan_result",
+      vehicleId,
+      requestId: commandId,
+      timestamp: Date.now(),
+      networks: [
+        { ssid: "Lab WiFi", rssi: -42, channel: 6, secure: true },
+        { ssid: "Guest", rssi: -71, channel: 1, secure: false },
+      ],
+    });
+
+    const result = await resultPromise;
+    assert.equal(result.networks.length, 2);
+    assert.deepEqual(result.networks[0], {
+      ssid: "Lab WiFi",
+      rssi: -42,
+      channel: 6,
+      secure: true,
+    });
   } finally {
     esp.close();
     controller.close();
