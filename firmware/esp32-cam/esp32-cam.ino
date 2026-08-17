@@ -6,7 +6,6 @@
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WebSocketsClient.h>
-#include <mbedtls/base64.h>
 
 // Required library:
 // - ArduinoJson by Benoit Blanchon
@@ -51,10 +50,16 @@ CamConfig config;
 bool cameraReady = false;
 bool flashOn = false;
 bool wsConnected = false;
+bool cloudFrameInFlight = false;
 unsigned long lastFrameAt = 0;
+unsigned long cloudFrameSentAt = 0;
 unsigned long lastStatusAt = 0;
 unsigned long lastCloudFrameErrorLogAt = 0;
-static const unsigned long CLOUD_FRAME_INTERVAL_MS = 350;
+uint32_t cloudFramesSent = 0;
+uint32_t cloudFrameAcks = 0;
+uint32_t cloudFrameAckTimeouts = 0;
+static const unsigned long CLOUD_FRAME_INTERVAL_MS = 140;
+static const unsigned long CLOUD_FRAME_ACK_TIMEOUT_MS = 2500;
 
 String deviceName();
 String streamUrl();
@@ -176,10 +181,10 @@ bool setupCamera() {
   cam.pixel_format = PIXFORMAT_JPEG;
   cam.grab_mode = CAMERA_GRAB_LATEST;
 
-  // Prefer low latency over image detail for FPV driving.
+  // VGA plus binary WebSocket frames gives a useful balance of detail and latency.
   if (psramFound()) {
-    Serial.println("PSRAM found. Using QVGA low-latency stream.");
-    cam.frame_size = FRAMESIZE_QVGA;
+    Serial.println("PSRAM found. Using VGA balanced FPV stream.");
+    cam.frame_size = FRAMESIZE_VGA;
     cam.jpeg_quality = 14;
     cam.fb_count = 2;
   } else {
@@ -197,7 +202,7 @@ bool setupCamera() {
 
   sensor_t *sensor = esp_camera_sensor_get();
   if (sensor) {
-    sensor->set_framesize(sensor, FRAMESIZE_QVGA);
+    sensor->set_framesize(sensor, psramFound() ? FRAMESIZE_VGA : FRAMESIZE_QVGA);
     sensor->set_quality(sensor, psramFound() ? 14 : 16);
     sensor->set_vflip(sensor, 0);
     sensor->set_hmirror(sensor, 0);
@@ -384,6 +389,18 @@ void sendCloudFrameErrorLog(const String &message) {
 void sendCloudFrame() {
   if (!cameraReady || !wsConnected) return;
 
+  const unsigned long now = millis();
+  if (cloudFrameInFlight) {
+    if (now - cloudFrameSentAt < CLOUD_FRAME_ACK_TIMEOUT_MS) return;
+
+    cloudFrameInFlight = false;
+    cloudFrameAckTimeouts++;
+    sendCloudFrameErrorLog("Camera frame ACK timeout; dropping stale frame");
+  }
+
+  if (now - lastFrameAt < CLOUD_FRAME_INTERVAL_MS) return;
+  lastFrameAt = now;
+
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("Cloud frame skipped: frame buffer unavailable");
@@ -391,59 +408,22 @@ void sendCloudFrame() {
     return;
   }
 
-  size_t encodedLen = 0;
-  int lenResult = mbedtls_base64_encode(nullptr, 0, &encodedLen, fb->buf, fb->len);
-  if (lenResult != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL || encodedLen == 0) {
-    Serial.println("Cloud frame skipped: base64 size failed");
-    sendCloudFrameErrorLog("Cloud frame skipped: base64 size failed");
-    esp_camera_fb_return(fb);
-    return;
-  }
-
-  String encoded;
-  encoded.reserve(encodedLen + 1);
-  char *encodedBuffer = new char[encodedLen + 1];
-  if (!encodedBuffer) {
-    Serial.println("Cloud frame skipped: out of memory");
-    sendCloudFrameErrorLog("Cloud frame skipped: out of memory");
-    esp_camera_fb_return(fb);
-    return;
-  }
-
-  if (mbedtls_base64_encode(
-          (unsigned char *)encodedBuffer,
-          encodedLen + 1,
-          &encodedLen,
-          fb->buf,
-          fb->len) != 0) {
-    Serial.println("Cloud frame skipped: base64 encode failed");
-    sendCloudFrameErrorLog("Cloud frame skipped: base64 encode failed");
-    delete[] encodedBuffer;
-    esp_camera_fb_return(fb);
-    return;
-  }
-
-  encodedBuffer[encodedLen] = '\0';
-  encoded = encodedBuffer;
-  delete[] encodedBuffer;
+  const bool sent = webSocket.sendBIN(fb->buf, fb->len);
   esp_camera_fb_return(fb);
 
-  String payload;
-  payload.reserve(encoded.length() + 160);
-  payload += "{\"type\":\"camera_frame\",\"vehicleId\":\"";
-  payload += config.vehicleId;
-  payload += "\",\"format\":\"jpeg\",\"width\":320,\"height\":240,\"timestamp\":";
-  payload += String(millis());
-  payload += ",\"data\":\"";
-  payload += encoded;
-  payload += "\"}";
-
-  webSocket.sendTXT(payload);
+  if (sent) {
+    cloudFrameInFlight = true;
+    cloudFrameSentAt = millis();
+    cloudFramesSent++;
+  } else {
+    sendCloudFrameErrorLog("Cloud frame skipped: WebSocket send failed");
+  }
 }
 
 void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   if (type == WStype_CONNECTED) {
     wsConnected = true;
+    cloudFrameInFlight = false;
     Serial.print("Camera WebSocket connected: ");
     Serial.print(config.wsScheme);
     Serial.print("://");
@@ -459,6 +439,17 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 
   if (type == WStype_DISCONNECTED) {
     wsConnected = false;
+    cloudFrameInFlight = false;
+    return;
+  }
+
+  if (type == WStype_TEXT) {
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload, length);
+    if (!error && strcmp(doc["type"] | "", "camera_frame_ack") == 0) {
+      cloudFrameInFlight = false;
+      cloudFrameAcks++;
+    }
     return;
   }
 
@@ -667,14 +658,22 @@ void loop() {
   webSocket.loop();
   server.handleClient();
 
-  unsigned long now = millis();
-  if (now - lastFrameAt > CLOUD_FRAME_INTERVAL_MS) {
-    lastFrameAt = now;
-    sendCloudFrame();
-  }
+  sendCloudFrame();
 
+  unsigned long now = millis();
   if (now - lastStatusAt > 3000) {
     lastStatusAt = now;
-    Serial.println(wsConnected ? "Camera cloud stream online" : "Camera cloud stream disconnected");
+    if (wsConnected) {
+      Serial.printf(
+        "Camera cloud online | sent=%lu ack=%lu timeout=%lu inFlight=%s RSSI=%d dBm\n",
+        (unsigned long)cloudFramesSent,
+        (unsigned long)cloudFrameAcks,
+        (unsigned long)cloudFrameAckTimeouts,
+        cloudFrameInFlight ? "yes" : "no",
+        WiFi.RSSI()
+      );
+    } else {
+      Serial.println("Camera cloud stream disconnected");
+    }
   }
 }

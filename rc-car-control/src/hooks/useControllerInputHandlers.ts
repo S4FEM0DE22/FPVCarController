@@ -22,7 +22,7 @@ function applyDeadzoneAndGain(value: number, gain: number, deadzone: number) {
   return Number(scaled.toFixed(3));
 }
 
-const MOVE_SEND_INTERVAL_MS = 90;
+const MOVE_SEND_INTERVAL_MS = 130;
 const ACTION_SEND_INTERVAL_MS = 220;
 
 function shouldSendTimed(

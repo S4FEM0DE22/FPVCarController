@@ -39,6 +39,15 @@ const RATE_LIMIT_BLOCK_MS = Number(process.env.RATE_LIMIT_BLOCK_MS || 15000);
 const RATE_LIMIT_CLEANUP_INTERVAL_MS = Number(
   process.env.RATE_LIMIT_CLEANUP_INTERVAL_MS || 120000
 );
+const CAMERA_FRAME_MIN_INTERVAL_MS = Number(
+  process.env.CAMERA_FRAME_MIN_INTERVAL_MS || 120
+);
+const CAMERA_FRAME_MAX_BYTES = Number(
+  process.env.CAMERA_FRAME_MAX_BYTES || 200000
+);
+const CAMERA_CONTROLLER_MAX_BUFFERED_BYTES = Number(
+  process.env.CAMERA_CONTROLLER_MAX_BUFFERED_BYTES || 128000
+);
 const ALLOW_LOCALHOST_AUTH_BYPASS =
   String(process.env.ALLOW_LOCALHOST_AUTH_BYPASS || "true").toLowerCase() !==
   "false";
@@ -263,12 +272,38 @@ function safeSend(ws, payload) {
   }
 }
 
+function safeSendBinary(ws, payload) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  if (ws.meta?.cameraFrameSending) return false;
+  if (ws.bufferedAmount > CAMERA_CONTROLLER_MAX_BUFFERED_BYTES) return false;
+
+  try {
+    if (ws.meta) ws.meta.cameraFrameSending = true;
+    ws.send(payload, { binary: true }, () => {
+      if (ws.meta) ws.meta.cameraFrameSending = false;
+    });
+    return true;
+  } catch {
+    if (ws.meta) ws.meta.cameraFrameSending = false;
+    return false;
+  }
+}
+
 function broadcastToControllers(vehicleId, payload) {
   const entry = vehicleRegistry.get(vehicleId);
   if (!entry) return;
 
   for (const client of entry.controllers) {
     safeSend(client, payload);
+  }
+}
+
+function broadcastBinaryToControllers(vehicleId, payload) {
+  const entry = vehicleRegistry.get(vehicleId);
+  if (!entry) return;
+
+  for (const client of entry.controllers) {
+    safeSendBinary(client, payload);
   }
 }
 
@@ -355,6 +390,9 @@ logger.info({
   rateLimitBlockMs: RATE_LIMIT_BLOCK_MS,
   controlActionRateLimitWindowMs: CONTROL_ACTION_RATE_LIMIT_WINDOW_MS,
   controlActionRateLimitMaxMessages: CONTROL_ACTION_RATE_LIMIT_MAX_MESSAGES,
+  cameraFrameMinIntervalMs: CAMERA_FRAME_MIN_INTERVAL_MS,
+  cameraFrameMaxBytes: CAMERA_FRAME_MAX_BYTES,
+  cameraControllerMaxBufferedBytes: CAMERA_CONTROLLER_MAX_BUFFERED_BYTES,
   controllerAuthEnabled: Boolean(CONTROLLER_AUTH_TOKEN),
   vehicleAuthEnabled: Boolean(VEHICLE_AUTH_TOKEN),
   allowLocalhostAuthBypass: ALLOW_LOCALHOST_AUTH_BYPASS,
@@ -371,6 +409,8 @@ wss.on("connection", (ws, request) => {
     vehicleId: null,
     controllerId: null,
     ip,
+    lastCameraFrameAt: 0,
+    cameraFrameSending: false,
   };
 
   logger.info({
@@ -380,8 +420,61 @@ wss.on("connection", (ws, request) => {
     userAgent: request?.headers?.["user-agent"] || null,
   });
 
-  ws.on("message", (raw) => {
-    const rate = isRateLimited(ip);
+  ws.on("message", (raw, isBinary) => {
+    if (isBinary) {
+      const vehicleId = ws.meta.vehicleId;
+      if (ws.meta.clientType !== "esp-cam" || !vehicleId) {
+        safeSend(ws, {
+          type: "error",
+          message: "Only an identified esp-cam can send binary frames",
+        });
+        return;
+      }
+
+      const isJpeg =
+        raw.length >= 4 &&
+        raw[0] === 0xff &&
+        raw[1] === 0xd8 &&
+        raw[raw.length - 2] === 0xff &&
+        raw[raw.length - 1] === 0xd9;
+
+      if (!isJpeg || raw.length > CAMERA_FRAME_MAX_BYTES) {
+        logger.warn({
+          event: "camera_frame.invalid_binary",
+          ip,
+          connectionId,
+          vehicleId,
+          bytes: raw.length,
+          isJpeg,
+        });
+        return;
+      }
+
+      const now = Date.now();
+      if (now - ws.meta.lastCameraFrameAt < CAMERA_FRAME_MIN_INTERVAL_MS) {
+        safeSend(ws, {
+          type: "camera_frame_ack",
+          accepted: false,
+          reason: "frame_interval",
+          timestamp: now,
+        });
+        return;
+      }
+      ws.meta.lastCameraFrameAt = now;
+
+      const entry = getVehicleEntry(vehicleId);
+      const frame = Buffer.from(raw);
+      entry.lastCameraFrame = frame;
+      broadcastBinaryToControllers(vehicleId, frame);
+      safeSend(ws, {
+        type: "camera_frame_ack",
+        accepted: true,
+        timestamp: now,
+      });
+      return;
+    }
+
+    const rate = isRateLimited(connectionId);
     if (rate.limited) {
       safeSend(ws, {
         type: "error",
@@ -512,7 +605,11 @@ wss.on("connection", (ws, request) => {
         }
 
         if (entry.lastCameraFrame) {
-          safeSend(ws, entry.lastCameraFrame);
+          if (Buffer.isBuffer(entry.lastCameraFrame)) {
+            safeSendBinary(ws, entry.lastCameraFrame);
+          } else {
+            safeSend(ws, entry.lastCameraFrame);
+          }
         }
 
         for (const deviceLog of entry.lastDeviceLogs) {
@@ -524,6 +621,14 @@ wss.on("connection", (ws, request) => {
           vehicleId,
           state: entry.esp ? "online" : "offline",
           message: entry.esp ? "ESP available" : "ESP not connected",
+        });
+
+        safeSend(ws, {
+          type: "camera_status",
+          vehicleId,
+          online: Boolean(entry.camera),
+          message: entry.camera ? "ESP32-CAM available" : "ESP32-CAM not connected",
+          timestamp: Date.now(),
         });
       } else {
         safeSend(ws, {
@@ -805,6 +910,57 @@ wss.on("connection", (ws, request) => {
 
       entry.lastDeviceLogs = [deviceLog, ...entry.lastDeviceLogs].slice(0, 80);
       broadcastToControllers(vehicleId, deviceLog);
+      return;
+    }
+
+    if (data.type === "wifi_scan_result") {
+      if (clientType !== "esp") {
+        safeSend(ws, {
+          type: "error",
+          message: "Only esp can send wifi_scan_result",
+        });
+        return;
+      }
+
+      const networks = Array.isArray(data.networks)
+        ? data.networks
+            .slice(0, 32)
+            .map((network) => ({
+              ssid:
+                typeof network?.ssid === "string"
+                  ? network.ssid.trim().slice(0, 32)
+                  : "",
+              rssi: Number.isFinite(Number(network?.rssi))
+                ? Math.max(-120, Math.min(0, Math.round(Number(network.rssi))))
+                : -100,
+              channel: Number.isFinite(Number(network?.channel))
+                ? Math.max(0, Math.min(14, Math.round(Number(network.channel))))
+                : 0,
+              secure: Boolean(network?.secure),
+            }))
+            .filter((network) => network.ssid)
+        : [];
+
+      broadcastToControllers(vehicleId, {
+        type: "wifi_scan_result",
+        vehicleId,
+        networks,
+        ...(typeof data.error === "string" && data.error.trim()
+          ? { error: data.error.trim().slice(0, 160) }
+          : {}),
+        ...(typeof data.requestId === "string" && data.requestId.trim()
+          ? { requestId: data.requestId.trim().slice(0, 96) }
+          : {}),
+        timestamp: data.timestamp || Date.now(),
+      });
+
+      logger.info({
+        event: "wifi_scan.received",
+        ip,
+        connectionId,
+        vehicleId,
+        networkCount: networks.length,
+      });
       return;
     }
 

@@ -1,8 +1,0 @@
-{
-  "scripts": {
-    "mock:ws": "node mock-server.js"
-  },
-  "dependencies": {
-    "ws": "^8.19.0"
-  }
-}

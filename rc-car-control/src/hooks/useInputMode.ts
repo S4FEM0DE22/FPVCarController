@@ -12,7 +12,8 @@ export default function useInputMode(isMobile: boolean) {
   const [manualInputMode, setManualInputMode] = useState<InputMode | null>(() =>
     hasConnectedGamepad() ? "gamepad" : null
   );
-  const inputMode = manualInputMode ?? (isMobile ? "touch" : "keyboard");
+  const resolvedManualMode = !isMobile && manualInputMode === "touch" ? null : manualInputMode;
+  const inputMode = resolvedManualMode ?? (isMobile ? "touch" : "keyboard");
 
   useEffect(() => {
     const onKeyDown = () => {

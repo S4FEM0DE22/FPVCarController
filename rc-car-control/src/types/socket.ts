@@ -84,6 +84,22 @@ export interface DeviceLogMessage {
   timestamp: number;
 }
 
+export interface WifiNetwork {
+  ssid: string;
+  rssi: number;
+  channel: number;
+  secure: boolean;
+}
+
+export interface WifiScanResultMessage {
+  type: "wifi_scan_result";
+  vehicleId: string;
+  networks: WifiNetwork[];
+  error?: string;
+  timestamp: number;
+  requestId?: string;
+}
+
 export interface StatusMessage {
   type: "status";
   vehicleId: string;
@@ -119,6 +135,7 @@ export type IncomingMessage =
   | CameraFrameMessage
   | CameraStatusMessage
   | DeviceLogMessage
+  | WifiScanResultMessage
   | StatusMessage
   | PongMessage
   | AckMessage

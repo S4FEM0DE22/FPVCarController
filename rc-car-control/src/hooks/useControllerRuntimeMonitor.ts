@@ -18,6 +18,7 @@ interface UseControllerRuntimeMonitorOptions {
   alertRules: ControllerAlertRules;
   watchdog: ControllerWatchdogSettings;
   connectionState: string;
+  vehicleOnline: boolean;
   lastCommand: ControlCommand;
   lastAction: ActionCommand | "-";
   latency: number | null;
@@ -30,6 +31,7 @@ export default function useControllerRuntimeMonitor({
   alertRules,
   watchdog,
   connectionState,
+  vehicleOnline,
   lastCommand,
   lastAction,
   latency,
@@ -57,6 +59,7 @@ export default function useControllerRuntimeMonitor({
   const latencyRef = useRef<number | null>(latency);
   const batteryRef = useRef(battery);
   const wifiRef = useRef(wifi);
+  const vehicleOnlineRef = useRef(vehicleOnline);
 
   useEffect(() => {
     if (lastUserInputAtRef.current === 0) {
@@ -68,7 +71,8 @@ export default function useControllerRuntimeMonitor({
     latencyRef.current = latency;
     batteryRef.current = battery;
     wifiRef.current = wifi;
-  }, [latency, battery, wifi]);
+    vehicleOnlineRef.current = vehicleOnline;
+  }, [latency, battery, wifi, vehicleOnline]);
 
   useEffect(() => {
     if (prevCommandRef.current === lastCommand) return;
@@ -145,10 +149,12 @@ export default function useControllerRuntimeMonitor({
       if (typeof currentLatency === "number") {
         setLatencySamples((prev) => [...prev.slice(-59), currentLatency]);
       }
-      setBatterySamples((prev) => [...prev.slice(-59), currentBattery]);
-      setWifiSamples((prev) => [...prev.slice(-59), currentWifi]);
+      if (vehicleOnlineRef.current) {
+        setBatterySamples((prev) => [...prev.slice(-59), currentBattery]);
+        setWifiSamples((prev) => [...prev.slice(-59), currentWifi]);
+      }
 
-      if (alertRules.enabled) {
+      if (alertRules.enabled && vehicleOnlineRef.current) {
         const batteryAlert = currentBattery <= alertRules.batteryBelow;
         const latencyAlert =
           typeof currentLatency === "number" && currentLatency >= alertRules.latencyAbove;
@@ -169,6 +175,8 @@ export default function useControllerRuntimeMonitor({
           latency: Boolean(latencyAlert),
           wifi: wifiAlert,
         };
+      } else if (!vehicleOnlineRef.current) {
+        alertFlagsRef.current = { battery: false, latency: false, wifi: false };
       }
 
       if (

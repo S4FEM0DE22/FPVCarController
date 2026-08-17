@@ -7,14 +7,14 @@ Web controller for an ESP32 FPV car. The app connects to the WebSocket relay ser
 Start the relay server first:
 
 ```powershell
-cd C:\Users\safem\FPVCarController\server
+cd server
 npm.cmd run dev
 ```
 
 Then start the web controller:
 
 ```powershell
-cd C:\Users\safem\FPVCarController\rc-car-control
+cd rc-car-control
 npm.cmd run dev
 ```
 
@@ -32,11 +32,12 @@ http://<computer-lan-ip>:3000/controller
 
 ## Environment Variables
 
-Create `.env.local` in this folder when you need custom endpoints:
+Copy `.env.example` to `.env.local` when you need custom endpoints:
 
 ```text
 NEXT_PUBLIC_WS_URL=ws://<server-ip>:8080
 NEXT_PUBLIC_VEHICLE_ID=car-001
+NEXT_PUBLIC_CONTROLLER_AUTH_TOKEN=<controller-token>
 NEXT_PUBLIC_ESP32_CAM_STREAM_URL=http://<esp32-cam-ip>/stream
 ```
 

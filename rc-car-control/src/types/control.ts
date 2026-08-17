@@ -21,6 +21,7 @@ export type ActionCommand =
   | "LIGHT_TOGGLE"
   | "HORN"
   | "PROFILE_APPLY"
+  | "WIFI_SCAN"
   | "WIFI_SET"
   | "NETWORK_RECONNECT"
   | "REBOOT"

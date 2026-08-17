@@ -30,6 +30,7 @@ export default function useVehicleSocket(
   const heartbeatTimerRef = useRef<number | null>(null);
   const shouldReconnectRef = useRef(true);
   const onMessageRef = useRef(options?.onMessage);
+  const onCameraFrameRef = useRef(options?.onCameraFrame);
   const reconnectAttemptRef = useRef(0);
   const outboundQueueRef = useRef<OutgoingMessage[]>([]);
   const pendingAckRef = useRef<Map<string, PendingAckEntry>>(new Map());
@@ -46,7 +47,8 @@ export default function useVehicleSocket(
 
   useEffect(() => {
     onMessageRef.current = options?.onMessage;
-  }, [options?.onMessage]);
+    onCameraFrameRef.current = options?.onCameraFrame;
+  }, [options?.onCameraFrame, options?.onMessage]);
 
   const updateQueueSize = useCallback(() => {
     setOutboundQueueSize(outboundQueueRef.current.length);
@@ -98,8 +100,13 @@ export default function useVehicleSocket(
       setLastPongAgeMs(age);
 
       if (age > HEARTBEAT_PONG_TIMEOUT_MS) {
+        if (document.visibilityState === "hidden") {
+          lastPongAtRef.current = now;
+          return;
+        }
+
         const ws = wsRef.current;
-        setLastError("Heartbeat timeout: pong not received within 15s");
+        setLastError("Heartbeat timeout: pong not received within 45s");
         socketLogger.warn("heartbeat timeout", { ageMs: age });
         ws?.close(4000, "heartbeat timeout");
       }
@@ -299,6 +306,7 @@ export default function useVehicleSocket(
 
     try {
       const ws = new WebSocket(NETWORK_CONFIG.wsUrl);
+      ws.binaryType = "arraybuffer";
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -316,6 +324,11 @@ export default function useVehicleSocket(
       };
 
       ws.onmessage = (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          onCameraFrameRef.current?.(event.data);
+          return;
+        }
+
         try {
           const data = JSON.parse(event.data) as IncomingMessage;
 
@@ -374,8 +387,39 @@ export default function useVehicleSocket(
     shouldReconnectRef.current = true;
     connect();
 
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        lastPongAtRef.current = Date.now();
+        setLastPongAgeMs(0);
+
+        const ws = wsRef.current;
+        if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+          connect();
+        } else if (ws.readyState === WebSocket.OPEN) {
+          sendRaw(buildPingMessage());
+        }
+      }
+    };
+
+    const handleOnline = () => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) connect();
+    };
+
+    const handleOffline = () => {
+      setConnectionState("DISCONNECTED");
+      setLastError("Device network is offline");
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
     return () => {
       shouldReconnectRef.current = false;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
       clearTimers();
       reconnectAttemptRef.current = 0;
       setReconnectAttempts(0);
@@ -387,7 +431,7 @@ export default function useVehicleSocket(
         wsRef.current = null;
       }
     };
-  }, [connect, clearPendingAckTimers, clearTimers]);
+  }, [connect, clearPendingAckTimers, clearTimers, sendRaw]);
 
   return {
     connectionState,

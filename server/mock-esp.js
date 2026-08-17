@@ -24,6 +24,7 @@ const ACTION_COMMANDS = new Set([
   "CAMERA_TOGGLE",
   "HORN",
   "PROFILE_APPLY",
+  "WIFI_SCAN",
   "WIFI_SET",
   "NETWORK_RECONNECT",
   "REBOOT",
@@ -31,8 +32,12 @@ const ACTION_COMMANDS = new Set([
 ]);
 
 const VEHICLE_ID = "car-001";
-const TILT_MIN = 0;
-const TILT_MAX = 90;
+const PAN_MIN = 15;
+const PAN_MAX = 175;
+const PAN_CENTER = 95;
+const TILT_MIN = 30;
+const TILT_MAX = 110;
+const TILT_CENTER = 64;
 const CAMERA_STEP_DEG = 6;
 
 const SIM = {
@@ -94,7 +99,8 @@ const vehicle = {
   },
   lightOn: false,
   cameraOn: true,
-  cameraTilt: 45,
+  cameraPan: PAN_CENTER,
+  cameraTilt: TILT_CENTER,
   battery: 100,
   wifi: -48,
   behaviorProfile: DEFAULT_PROFILE,
@@ -196,6 +202,7 @@ function buildTelemetry() {
       steering: vehicle.drive.steering,
     },
     lightOn: vehicle.lightOn,
+    cameraPan: Math.round(vehicle.cameraPan),
     cameraTilt: Math.round(vehicle.cameraTilt),
     behaviorProfile: vehicle.behaviorProfile,
     failure: isFailureActive()
@@ -279,6 +286,21 @@ function applyControl(data) {
 function applyAction(data) {
   if (!ACTION_COMMANDS.has(data.action)) return;
 
+  if (data.action === "WIFI_SCAN") {
+    sendJson({
+      type: "wifi_scan_result",
+      vehicleId: VEHICLE_ID,
+      requestId: data.commandId,
+      timestamp: Date.now(),
+      networks: [
+        { ssid: "FPV-Lab", rssi: -46, channel: 11, secure: true },
+        { ssid: "Phone-Hotspot", rssi: -61, channel: 6, secure: true },
+        { ssid: "Workshop-Guest", rssi: -73, channel: 1, secure: false },
+      ],
+    });
+    return;
+  }
+
   const amount = clamp(Number(data.payload?.amount ?? 1), 0.25, 1);
 
   if (data.action === "LIGHT_TOGGLE") {
@@ -297,7 +319,8 @@ function applyAction(data) {
   }
 
   if (data.action === "CAM_RESET") {
-    vehicle.cameraTilt = 45;
+    vehicle.cameraPan = PAN_CENTER;
+    vehicle.cameraTilt = TILT_CENTER;
     return;
   }
 
@@ -318,6 +341,22 @@ function applyAction(data) {
       vehicle.cameraTilt - (vehicle.behaviorProfile?.cameraStepDeg || CAMERA_STEP_DEG) * amount,
       TILT_MIN,
       TILT_MAX
+    );
+  }
+
+  if (data.action === "CAM_LEFT") {
+    vehicle.cameraPan = clamp(
+      vehicle.cameraPan + (vehicle.behaviorProfile?.cameraStepDeg || CAMERA_STEP_DEG) * amount,
+      PAN_MIN,
+      PAN_MAX
+    );
+  }
+
+  if (data.action === "CAM_RIGHT") {
+    vehicle.cameraPan = clamp(
+      vehicle.cameraPan - (vehicle.behaviorProfile?.cameraStepDeg || CAMERA_STEP_DEG) * amount,
+      PAN_MIN,
+      PAN_MAX
     );
   }
 }

@@ -19,6 +19,7 @@ interface MobileControlsProps {
   streamUrl?: string;
   frameSrc?: string;
   connectionState: string;
+  vehicleOnline: boolean;
   battery: number;
   wifi: number;
   latency: number | null;
@@ -26,7 +27,6 @@ interface MobileControlsProps {
   cameraTilt?: number;
   lastCommand?: string;
   lastAction?: string;
-  lastActionAt?: number;
   actionPressed?: boolean;
   desktop?: boolean;
   persistentControls?: boolean;
@@ -35,6 +35,7 @@ interface MobileControlsProps {
   alertLevel?: "warn" | "info";
   inputMode?: InputMode;
   externalPressedQuickAction?: "horn" | "cameraReset" | null;
+  onExitFullscreen?: () => void;
 }
 
 export default function MobileControls({
@@ -48,6 +49,7 @@ export default function MobileControls({
   streamUrl = "",
   frameSrc = "",
   connectionState,
+  vehicleOnline,
   battery,
   wifi,
   latency,
@@ -55,7 +57,6 @@ export default function MobileControls({
   cameraTilt,
   lastCommand,
   lastAction,
-  lastActionAt,
   actionPressed,
   desktop = false,
   persistentControls = false,
@@ -64,6 +65,7 @@ export default function MobileControls({
   alertLevel,
   inputMode = "touch",
   externalPressedQuickAction = null,
+  onExitFullscreen,
 }: MobileControlsProps) {
   const [controlsVisible, setControlsVisible] = useState(true);
   const hideTimerRef = useRef<number | null>(null);
@@ -112,7 +114,7 @@ export default function MobileControls({
       document.body.style.overflow = "hidden";
       document.documentElement.style.overflow = "hidden";
     }
-    document.body.style.touchAction = "none";
+    document.body.style.touchAction = desktop ? "none" : "manipulation";
 
     return () => {
       document.body.style.overflow = prevBodyOverflow;
@@ -140,6 +142,7 @@ export default function MobileControls({
       <div className={`absolute inset-0 transition-opacity duration-300 ${controlsVisibilityClass}`}>
         <MobileStatusBar
           connectionState={connectionState}
+          vehicleOnline={vehicleOnline}
           battery={battery}
           wifi={wifi}
           latency={latency}
@@ -147,7 +150,6 @@ export default function MobileControls({
           cameraTilt={cameraTilt}
           lastCommand={lastCommand}
           lastAction={lastAction}
-          lastActionAt={lastActionAt}
           actionPressed={actionPressed}
           onSettings={onOpenSettings}
           onInfo={onOpenInfo}
@@ -156,6 +158,7 @@ export default function MobileControls({
           alertMessage={alertMessage}
           alertLevel={alertLevel}
           inputMode={inputMode}
+          onExitFullscreen={onExitFullscreen}
         />
 
         {showVirtualJoysticks && (

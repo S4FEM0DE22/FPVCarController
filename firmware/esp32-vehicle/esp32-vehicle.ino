@@ -89,6 +89,8 @@ bool setupProvisionReady = false;
 bool setupConnectDone = false;
 bool setupConnectOk = false;
 unsigned long setupSavedAt = 0;
+bool wifiScanInProgress = false;
+String wifiScanRequestId = "";
 
 void sendDeviceLog(const char *level, const String &message);
 
@@ -346,6 +348,74 @@ void sendTelemetry() {
   sendJsonDocument(doc);
 }
 
+void sendWifiScanResult(int networkCount, const char *errorMessage = nullptr) {
+  JsonDocument doc;
+  doc["type"] = "wifi_scan_result";
+  doc["vehicleId"] = config.vehicleId;
+  doc["timestamp"] = millis();
+  if (wifiScanRequestId.length() > 0) {
+    doc["requestId"] = wifiScanRequestId;
+  }
+  if (errorMessage && strlen(errorMessage) > 0) {
+    doc["error"] = errorMessage;
+  }
+
+  JsonArray networks = doc["networks"].to<JsonArray>();
+  int limit = min(networkCount, 32);
+  for (int i = 0; i < limit; i++) {
+    String ssid = WiFi.SSID(i);
+    if (ssid.length() == 0) continue;
+
+    JsonObject network = networks.add<JsonObject>();
+    network["ssid"] = ssid;
+    network["rssi"] = WiFi.RSSI(i);
+    network["channel"] = WiFi.channel(i);
+    network["secure"] = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+  }
+
+  sendJsonDocument(doc);
+  sendDeviceLog(
+      errorMessage ? "error" : "info",
+      errorMessage ? String("WiFi scan failed: ") + errorMessage
+                   : String("WiFi scan complete: ") + networkCount + " access points");
+}
+
+void startWifiScan(const char *commandId) {
+  if (wifiScanInProgress) {
+    sendDeviceLog("warn", "WiFi scan already running");
+    return;
+  }
+
+  wifiScanRequestId = commandId ? String(commandId) : "";
+  WiFi.scanDelete();
+  int scanState = WiFi.scanNetworks(true, false);
+  if (scanState == WIFI_SCAN_FAILED) {
+    sendWifiScanResult(0, "ESP32 could not start WiFi scan");
+    wifiScanRequestId = "";
+    return;
+  }
+
+  wifiScanInProgress = true;
+  sendDeviceLog("info", "WiFi scan started");
+}
+
+void processWifiScan() {
+  if (!wifiScanInProgress) return;
+
+  int networkCount = WiFi.scanComplete();
+  if (networkCount == WIFI_SCAN_RUNNING) return;
+
+  wifiScanInProgress = false;
+  if (networkCount == WIFI_SCAN_FAILED) {
+    sendWifiScanResult(0, "ESP32 WiFi scan failed");
+  } else {
+    sendWifiScanResult(networkCount);
+  }
+
+  WiFi.scanDelete();
+  wifiScanRequestId = "";
+}
+
 float payloadNumber(JsonObject payload, const char *key, float fallback) {
   if (payload.isNull() || !payload[key].is<float>()) return fallback;
   return payload[key].as<float>();
@@ -482,6 +552,8 @@ void handleAction(JsonDocument &doc) {
     ESP.restart();
   } else if (strcmp(action, "PROFILE_APPLY") == 0) {
     applyBehaviorProfile(payload);
+  } else if (strcmp(action, "WIFI_SCAN") == 0) {
+    startWifiScan(commandId);
   } else if (strcmp(action, "WIFI_SET") == 0) {
     changeWiFiFromPayload(payload);
   } else if (strcmp(action, "WIFI_PORTAL_OPEN") == 0) {
@@ -873,6 +945,7 @@ void setup() {
 void loop() {
   webSocket.loop();
   portalServer.handleClient();
+  processWifiScan();
 
   unsigned long now = millis();
   if (buzzerOffAt > 0 && now >= buzzerOffAt) {
