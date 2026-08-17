@@ -420,6 +420,7 @@ wss.on("connection", (ws, request) => {
     lastCameraFrameAt: 0,
     cameraFrameSending: false,
     cameraFrameSequence: 0,
+    legacyCameraFrameId: null,
   };
 
   logger.info({
@@ -440,7 +441,23 @@ wss.on("connection", (ws, request) => {
         return;
       }
 
-      const frameId = ++ws.meta.cameraFrameSequence;
+      if (
+        raw.length === 8 &&
+        raw[0] === 0x46 &&
+        raw[1] === 0x50 &&
+        raw[2] === 0x56 &&
+        raw[3] === 0x31
+      ) {
+        ws.meta.legacyCameraFrameId = raw.readUInt32BE(4);
+        return;
+      }
+
+      const legacyFrameId = ws.meta.legacyCameraFrameId;
+      ws.meta.legacyCameraFrameId = null;
+      const frameId = legacyFrameId ?? ++ws.meta.cameraFrameSequence;
+      if (legacyFrameId !== null) {
+        ws.meta.cameraFrameSequence = legacyFrameId;
+      }
 
       const isJpeg =
         raw.length >= 4 &&

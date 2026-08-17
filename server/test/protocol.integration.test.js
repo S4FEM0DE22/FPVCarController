@@ -389,6 +389,35 @@ test("binary camera frame acknowledgements use a monotonic frame ID", async () =
   }
 });
 
+test("relay accepts the previous explicit camera frame header during rollout", async () => {
+  const vehicleId = `test-camera-legacy-frame-id-${Date.now()}`;
+  const url = `ws://127.0.0.1:${serverPort}`;
+  const camera = await connectClient(url);
+
+  try {
+    sendJson(camera, { type: "identify", clientType: "esp-cam", vehicleId });
+    await waitForMessage(camera, (msg) => msg.type === "ack");
+
+    const header = Buffer.alloc(8);
+    header.write("FPV1", 0, "ascii");
+    header.writeUInt32BE(27, 4);
+    camera.send(header, { binary: true });
+
+    const frameAck = waitForMessage(
+      camera,
+      (msg) => msg.type === "camera_frame_ack" && msg.frameId === 27
+    );
+    camera.send(
+      Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x01, 0xff, 0xd9]),
+      { binary: true }
+    );
+
+    assert.equal((await frameAck).accepted, true);
+  } finally {
+    camera.close();
+  }
+});
+
 test("camera movement actions notify esp-cam before motion frames", async () => {
   const vehicleId = `test-camera-motion-${Date.now()}`;
   const url = `ws://127.0.0.1:${serverPort}`;
