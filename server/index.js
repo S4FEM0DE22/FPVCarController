@@ -388,7 +388,6 @@ function failPendingWifiChange(entry, message) {
     payload: { reason: message },
   };
   safeSend(entry.esp, rollback);
-  safeSend(entry.camera, rollback);
   entry.pendingWifiChange = null;
   safeSend(pending.controller, {
     type: "error",
@@ -403,7 +402,7 @@ function wifiParticipantName(clientType) {
   return null;
 }
 
-function sendWifiActionToBoth(entry, pending, action, includeCredentials = false) {
+function sendWifiActionToVehicle(entry, pending, action, includeCredentials = false) {
   const message = {
     type: "action",
     action,
@@ -412,7 +411,7 @@ function sendWifiActionToBoth(entry, pending, action, includeCredentials = false
       ? { ssid: pending.ssid, password: pending.password }
       : {},
   };
-  return safeSend(entry.esp, message) && safeSend(entry.camera, message);
+  return safeSend(entry.esp, message);
 }
 
 function scheduleWifiTransactionTimeout(entry, pending, timeoutMs, message) {
@@ -451,6 +450,45 @@ function maybeStartWifiApply(entry, pending) {
     ssid: pending.ssid,
   });
   return true;
+}
+
+function maybeStartWifiSwitch(entry, pending) {
+  if (pending.stage !== "arming" || pending.armed.size !== 2) return true;
+
+  pending.stage = "switching";
+  scheduleWifiTransactionTimeout(
+    entry,
+    pending,
+    WIFI_UPDATE_ACK_TIMEOUT_MS,
+    "WiFi switch timed out; both devices are restoring the previous network"
+  );
+  if (!sendWifiActionToVehicle(entry, pending, "WIFI_SWITCH")) {
+    failPendingWifiChange(entry, "Vehicle disconnected before WiFi switch");
+    return false;
+  }
+  logger.info({
+    event: "wifi_update.switch_sent",
+    vehicleId: entry.esp?.meta?.vehicleId || null,
+    commandId: pending.commandId,
+    ssid: pending.ssid,
+  });
+  return true;
+}
+
+function completePendingWifiChange(entry, pending) {
+  clearTimeout(pending.timeoutId);
+  entry.pendingWifiChange = null;
+  safeSend(pending.controller, {
+    type: "ack",
+    commandId: pending.commandId,
+    message: `Vehicle and camera are online through ${pending.ssid}`,
+  });
+  logger.info({
+    event: "wifi_update.committed",
+    vehicleId: entry.esp?.meta?.vehicleId || null,
+    commandId: pending.commandId,
+    ssid: pending.ssid,
+  });
 }
 
 function createLegacyCommandId(prefix) {
@@ -994,13 +1032,21 @@ wss.on("connection", (ws, request) => {
       return;
     }
 
-    if (data.type === "wifi_phase_ack") {
+    if (
+      data.type === "wifi_phase_ack" ||
+      data.type === "wifi_uart_camera_phase"
+    ) {
       const pending = entry.pendingWifiChange;
       const commandId =
         typeof data.commandId === "string" ? data.commandId.trim() : "";
       if (!pending || !commandId || pending.commandId !== commandId) return;
 
-      const participant = wifiParticipantName(clientType);
+      const uartCameraPhase = data.type === "wifi_uart_camera_phase";
+      const participant = uartCameraPhase
+        ? clientType === "esp"
+          ? "camera"
+          : null
+        : wifiParticipantName(clientType);
       const phase = typeof data.phase === "string" ? data.phase : "";
       if (!participant || data.ok !== true || data.ssid !== pending.ssid) {
         failPendingWifiChange(
@@ -1015,7 +1061,13 @@ wss.on("connection", (ws, request) => {
         if (!maybeStartWifiApply(entry, pending)) return;
       } else if (phase === "armed") {
         pending.armed.add(participant);
-        if (pending.armed.size === 2) pending.stage = "switching";
+        if (!maybeStartWifiSwitch(entry, pending)) return;
+      } else if (phase === "committed") {
+        if (pending.stage !== "committing") return;
+        pending.committed.add(participant);
+        if (pending.committed.size === 2) {
+          completePendingWifiChange(entry, pending);
+        }
       } else if (phase === "rolled_back") {
         failPendingWifiChange(entry, data.message || "WiFi update was rolled back");
       }
@@ -1029,34 +1081,6 @@ wss.on("connection", (ws, request) => {
         participant,
         phase,
       });
-      return;
-    }
-
-    if (data.type === "wifi_local_camera_ready") {
-      const pending = entry.pendingWifiChange;
-      const commandId =
-        typeof data.commandId === "string" ? data.commandId.trim() : "";
-      if (
-        clientType !== "esp" ||
-        !pending ||
-        !commandId ||
-        pending.commandId !== commandId ||
-        data.ssid !== pending.ssid
-      ) {
-        return;
-      }
-
-      pending.prepared.add("camera");
-      pending.armed.add("camera");
-      logger.info({
-        event: "wifi_update.camera_received_from_vehicle",
-        ip,
-        connectionId,
-        vehicleId,
-        commandId,
-        ssid: pending.ssid,
-      });
-      maybeStartWifiApply(entry, pending);
       return;
     }
 
@@ -1103,23 +1127,17 @@ wss.on("connection", (ws, request) => {
           );
           return;
         }
-        if (!sendWifiActionToBoth(entry, pending, "WIFI_COMMIT")) {
+        pending.stage = "committing";
+        scheduleWifiTransactionTimeout(
+          entry,
+          pending,
+          WIFI_PREPARE_ACK_TIMEOUT_MS,
+          "A device did not confirm the WiFi commit in time"
+        );
+        if (!sendWifiActionToVehicle(entry, pending, "WIFI_COMMIT")) {
           failPendingWifiChange(entry, "A device disconnected before WiFi commit");
           return;
         }
-        clearTimeout(pending.timeoutId);
-        entry.pendingWifiChange = null;
-        safeSend(pending.controller, {
-          type: "ack",
-          commandId,
-          message: `Vehicle and camera are online through ${pending.ssid}`,
-        });
-        logger.info({
-          event: "wifi_update.committed",
-          vehicleId,
-          commandId,
-          ssid: pending.ssid,
-        });
       }
       return;
     }
@@ -1321,14 +1339,6 @@ wss.on("connection", (ws, request) => {
           });
           return;
         }
-        if (!entry.camera) {
-          safeSend(ws, {
-            type: "error",
-            commandId,
-            message: "ESP32-CAM must be online before changing WiFi",
-          });
-          return;
-        }
         failPendingWifiChange(entry, "WiFi update replaced by a newer request");
         const pending = {
           commandId,
@@ -1339,6 +1349,7 @@ wss.on("connection", (ws, request) => {
           prepared: new Set(),
           armed: new Set(),
           connected: new Set(),
+          committed: new Set(),
           gateways: new Map(),
           timeoutId: null,
         };
@@ -1356,16 +1367,10 @@ wss.on("connection", (ws, request) => {
           commandId,
           payload: { ssid, password },
         });
-        const cameraWaiting = safeSend(entry.camera, {
-          type: "action",
-          action: "WIFI_WAIT_FOR_VEHICLE",
-          commandId,
-          payload: {},
-        });
-        if (!vehiclePrepared || !cameraWaiting) {
+        if (!vehiclePrepared) {
           failPendingWifiChange(
             entry,
-            "Could not start the local WiFi handoff on both devices"
+            "Could not send the WiFi update to the vehicle"
           );
           return;
         }

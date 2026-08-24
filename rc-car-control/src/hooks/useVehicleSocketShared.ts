@@ -25,7 +25,7 @@ const HEARTBEAT_PONG_TIMEOUT_MS = 45000;
 const HEARTBEAT_PING_INTERVAL_MS = 10000;
 const ACK_TIMEOUT_MS = 15000;
 const ACK_MAX_RETRIES = 3;
-const WIFI_UPDATE_ACK_TIMEOUT_MS = 100000;
+const WIFI_UPDATE_ACK_TIMEOUT_MS = 130000;
 
 function withJitter(delayMs: number) {
   const jitter = delayMs * RECONNECT_JITTER_RATIO;

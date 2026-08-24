@@ -407,7 +407,7 @@ export default function SettingsPanel({
                   <h3 className="text-sm font-semibold text-neutral-800">เปลี่ยน Wi-Fi ของรถและกล้อง</h3>
                 </div>
                 <p className="mb-3 text-xs leading-5 text-slate-500">
-                  Cloud ส่งค่าให้ ESP32 หลัก จากนั้นกล้องจะรับค่าจากรถโดยตรง และบันทึกถาวรเมื่อทั้งคู่กลับมาออนไลน์สำเร็จ
+                  Cloud ส่งค่าให้ ESP32 หลักเพียงครั้งเดียว จากนั้นรถส่งต่อให้กล้องผ่านสาย UART และบันทึกเมื่อทั้งคู่กลับมาออนไลน์สำเร็จ
                 </p>
 
                 <div className="space-y-3">

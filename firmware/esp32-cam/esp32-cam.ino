@@ -2,7 +2,6 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
-#include <HTTPClient.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WebSocketsClient.h>
@@ -30,9 +29,9 @@
 #define PCLK_GPIO_NUM 22
 #define FLASH_LED_PIN 4
 
-static const char *SETUP_AP_SSID = "FPV-Car-Setup";
-static const char *HANDOFF_AP_SSID = "FPV-Car-Handoff";
-static const char *DEVICE_AP_PASSWORD = "12345678";
+static const int PIN_VEHICLE_UART_RX = 13;
+static const int PIN_VEHICLE_UART_TX = 14;
+static const uint32_t VEHICLE_UART_BAUD = 115200;
 
 struct CamConfig {
   char wifiSsid[64] = "";
@@ -51,6 +50,7 @@ struct CamConfig {
 Preferences prefs;
 WebServer server(80);
 WebSocketsClient webSocket;
+HardwareSerial vehicleUart(1);
 CamConfig config;
 sensor_t *cameraSensor = nullptr;
 bool cameraReady = false;
@@ -102,6 +102,11 @@ bool wifiFallbackInProgress = false;
 bool wifiCandidateStatusSent = false;
 unsigned long wifiTransactionStartedAt = 0;
 const unsigned long WIFI_COMMIT_TIMEOUT_MS = 60000;
+String vehicleUartBuffer = "";
+bool uartProvisionReceived = false;
+unsigned long uartProvisionRestartAt = 0;
+String lastCommittedWifiCommandId = "";
+String lastCommittedWifiSsid = "";
 
 String deviceName();
 String streamUrl();
@@ -112,6 +117,7 @@ void sendCameraStreamStatus(float fps = 0.0f);
 void tuneCloudJpegQuality();
 void setCloudMotionMode(bool active);
 void applyCloudStreamProfile(const char *profile, bool persist);
+void processVehicleUart();
 
 void printCameraConfig() {
   Serial.println();
@@ -583,108 +589,171 @@ void rollbackWifiCandidate(const char *commandId, const char *reason) {
   clearWifiTransaction();
 }
 
-bool fetchWifiCandidateFromVehicle(const char *commandId) {
-  HTTPClient http;
-  String url = String("http://192.168.4.1/api/wifi-candidate?commandId=") + commandId;
-  http.setTimeout(2500);
-  http.begin(url);
-  int status = http.GET();
-  if (status != 200) {
-    http.end();
-    return false;
-  }
+void sendVehicleUartDocument(JsonDocument &doc) {
+  serializeJson(doc, vehicleUart);
+  vehicleUart.write('\n');
+  vehicleUart.flush();
+}
 
-  String body = http.getString();
-  http.end();
+void sendVehicleWifiAck(
+  const String &commandId,
+  const char *phase,
+  bool ok,
+  const String &ssid,
+  const String &message
+) {
   JsonDocument doc;
-  if (deserializeJson(doc, body) || !(doc["ready"] | false)) return false;
-  if (String(doc["commandId"] | "") != commandId) return false;
+  doc["type"] = "wifi_ack";
+  doc["commandId"] = commandId;
+  doc["phase"] = phase;
+  doc["ok"] = ok;
+  doc["ssid"] = ssid;
+  doc["message"] = message;
+  sendVehicleUartDocument(doc);
+}
 
-  String ssid = doc["ssid"] | "";
-  if (ssid.length() == 0) return false;
-  wifiCandidateSsid = ssid;
-  wifiCandidatePass = String(doc["password"] | "");
-  wifiTransactionPrepared = true;
-  persistWifiCandidate("prepared");
+bool applyUartProvision(JsonDocument &doc) {
+  const char *ssid = doc["ssid"] | "";
+  String requestId = doc["requestId"] | "";
+  if (strlen(ssid) == 0 || requestId.length() == 0) return false;
+
+  strlcpy(config.wifiSsid, ssid, sizeof(config.wifiSsid));
+  strlcpy(config.wifiPass, doc["password"] | "", sizeof(config.wifiPass));
+  strlcpy(config.wsScheme, doc["wsScheme"] | config.wsScheme, sizeof(config.wsScheme));
+  strlcpy(config.wsHost, doc["wsHost"] | config.wsHost, sizeof(config.wsHost));
+  strlcpy(config.wsPort, doc["wsPort"] | config.wsPort, sizeof(config.wsPort));
+  strlcpy(config.wsPath, doc["wsPath"] | config.wsPath, sizeof(config.wsPath));
+  strlcpy(config.vehicleId, doc["vehicleId"] | config.vehicleId, sizeof(config.vehicleId));
+  strlcpy(config.authToken, doc["authToken"] | config.authToken, sizeof(config.authToken));
+  strlcpy(config.controlUrl, doc["controlUrl"] | config.controlUrl, sizeof(config.controlUrl));
+  saveConfig();
+
+  JsonDocument ack;
+  ack["type"] = "provision_ack";
+  ack["requestId"] = requestId;
+  ack["ok"] = true;
+  ack["message"] = "camera saved UART provision";
+  sendVehicleUartDocument(ack);
+  uartProvisionReceived = true;
+  uartProvisionRestartAt = millis() + 700;
+  Serial.print("Provision saved from vehicle UART: SSID=");
+  Serial.println(config.wifiSsid);
   return true;
 }
 
-bool acknowledgeWifiCandidateToVehicle(const char *commandId) {
-  HTTPClient http;
-  String url = String("http://192.168.4.1/api/wifi-candidate-ack?commandId=") + commandId;
-  http.setTimeout(2500);
-  http.begin(url);
-  int status = http.POST("");
-  http.end();
-  return status == 200;
-}
+void handleVehicleWifiAction(JsonDocument &doc) {
+  String action = doc["action"] | "";
+  String commandId = doc["commandId"] | "";
+  if (commandId.length() == 0) return;
 
-bool waitForVehicleWifiApply(const char *commandId, unsigned long &delayMs) {
-  unsigned long startedAt = millis();
-  while (millis() - startedAt < 25000) {
-    if (WiFi.status() != WL_CONNECTED) return false;
-    HTTPClient http;
-    String url = String("http://192.168.4.1/api/wifi-apply?commandId=") + commandId;
-    http.setTimeout(2000);
-    http.begin(url);
-    int status = http.GET();
-    if (status == 200) {
-      String body = http.getString();
-      JsonDocument doc;
-      if (!deserializeJson(doc, body) && (doc["apply"] | false)) {
-        delayMs = constrain((unsigned long)(doc["delayMs"] | 2500), 1000UL, 5000UL);
-        http.end();
-        return true;
-      }
+  if (action == "prepare") {
+    String ssid = doc["ssid"] | "";
+    if (ssid.length() == 0) {
+      sendVehicleWifiAck(commandId, "prepared", false, "", "missing WiFi SSID");
+      return;
     }
-    http.end();
-    delay(300);
+    if (
+      wifiTransactionPrepared &&
+      wifiTransactionCommandId == commandId &&
+      wifiCandidateSsid == ssid
+    ) {
+      sendVehicleWifiAck(commandId, "prepared", true, ssid, "camera already prepared");
+      return;
+    }
+    clearWifiTransaction();
+    wifiTransactionCommandId = commandId;
+    wifiCandidateSsid = ssid;
+    wifiCandidatePass = String(doc["password"] | "");
+    wifiActiveSsid = config.wifiSsid;
+    wifiActivePass = config.wifiPass;
+    wifiTransactionPrepared = true;
+    wifiTransactionStartedAt = millis();
+    persistWifiCandidate("prepared");
+    sendVehicleWifiAck(commandId, "prepared", true, ssid, "camera stored WiFi candidate over UART");
+    return;
   }
-  return false;
+
+  if (
+    action == "commit" &&
+    commandId == lastCommittedWifiCommandId &&
+    lastCommittedWifiSsid.length() > 0
+  ) {
+    sendVehicleWifiAck(
+      commandId,
+      "committed",
+      true,
+      lastCommittedWifiSsid,
+      "camera commit already applied"
+    );
+    return;
+  }
+  if (commandId != wifiTransactionCommandId) return;
+  if (action == "arm") {
+    wifiTransactionArmed = true;
+    wifiTransactionStartedAt = millis();
+    persistWifiCandidate("armed");
+    sendVehicleWifiAck(commandId, "armed", true, wifiCandidateSsid, "camera armed over UART");
+  } else if (action == "switch") {
+    if (!wifiTransactionArmed) {
+      sendVehicleWifiAck(commandId, "switching", false, wifiCandidateSsid, "camera was not armed");
+      return;
+    }
+    unsigned long delayMs = constrain((unsigned long)(doc["delayMs"] | 3000), 1500UL, 5000UL);
+    wifiSwitchPending = true;
+    wifiSwitchAt = millis() + delayMs;
+    wifiTransactionStartedAt = millis();
+    sendVehicleWifiAck(commandId, "switching", true, wifiCandidateSsid, "camera switch scheduled");
+  } else if (action == "commit") {
+    if (!wifiCandidateConnected) return;
+    saveConfig();
+    lastCommittedWifiCommandId = commandId;
+    lastCommittedWifiSsid = wifiCandidateSsid;
+    sendVehicleWifiAck(commandId, "committed", true, wifiCandidateSsid, "camera committed active WiFi");
+    clearWifiTransaction();
+  } else if (action == "rollback") {
+    String reason = doc["reason"] | "vehicle requested rollback";
+    if (wifiCandidateConnected || wifiSwitchInProgress || wifiTransactionArmed) {
+      restoreActiveWifi(reason.c_str());
+    } else {
+      sendVehicleWifiAck(commandId, "rolled_back", true, wifiCandidateSsid, reason);
+      clearWifiTransaction();
+    }
+  }
 }
 
-void receiveWifiCandidateFromVehicle(const char *commandId) {
-  if (!commandId || strlen(commandId) == 0) return;
-
-  clearWifiTransaction();
-  wifiTransactionCommandId = commandId;
-  wifiActiveSsid = config.wifiSsid;
-  wifiActivePass = config.wifiPass;
-  wifiTransactionPrepared = true;
-  wifiTransactionStartedAt = millis();
-  sendDeviceLog("info", "Camera entering local WiFi receive mode");
-
-  beginStaConnection(HANDOFF_AP_SSID, DEVICE_AP_PASSWORD, false);
-  unsigned long connectStartedAt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - connectStartedAt < 15000) {
-    delay(150);
-  }
-  if (WiFi.status() != WL_CONNECTED) {
-    restoreActiveWifi("vehicle handoff AP unavailable");
+void handleVehicleUartLine(const String &line) {
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, line);
+  if (error) {
+    Serial.print("Vehicle UART JSON error: ");
+    Serial.println(error.c_str());
     return;
   }
-
-  bool fetched = false;
-  for (int attempt = 0; attempt < 8 && !fetched; ++attempt) {
-    fetched = fetchWifiCandidateFromVehicle(commandId);
-    if (!fetched) delay(350);
+  const char *type = doc["type"] | "";
+  if (strcmp(type, "provision") == 0) {
+    applyUartProvision(doc);
+  } else if (strcmp(type, "wifi_action") == 0) {
+    handleVehicleWifiAction(doc);
   }
-  if (!fetched || !acknowledgeWifiCandidateToVehicle(commandId)) {
-    restoreActiveWifi("camera could not receive WiFi candidate");
-    return;
-  }
+}
 
-  unsigned long switchDelayMs = 2500;
-  if (!waitForVehicleWifiApply(commandId, switchDelayMs)) {
-    restoreActiveWifi("vehicle did not authorize WiFi apply");
-    return;
+void processVehicleUart() {
+  while (vehicleUart.available() > 0) {
+    char value = (char)vehicleUart.read();
+    if (value == '\r') continue;
+    if (value == '\n') {
+      if (vehicleUartBuffer.length() > 0) {
+        handleVehicleUartLine(vehicleUartBuffer);
+        vehicleUartBuffer = "";
+      }
+      continue;
+    }
+    if (vehicleUartBuffer.length() < 1200) {
+      vehicleUartBuffer += value;
+    } else {
+      vehicleUartBuffer = "";
+    }
   }
-
-  wifiTransactionArmed = true;
-  wifiTransactionStartedAt = millis();
-  persistWifiCandidate("armed");
-  wifiSwitchPending = true;
-  wifiSwitchAt = millis() + switchDelayMs;
 }
 
 void sendCameraStreamStatus(float fps) {
@@ -939,8 +1008,6 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
       JsonObject actionPayload = doc["payload"].as<JsonObject>();
       if (strcmp(action, "WIFI_PREPARE") == 0) {
         prepareWifiCandidate(actionPayload, commandId);
-      } else if (strcmp(action, "WIFI_WAIT_FOR_VEHICLE") == 0) {
-        receiveWifiCandidateFromVehicle(commandId);
       } else if (strcmp(action, "WIFI_APPLY") == 0) {
         armWifiCandidate(commandId);
       } else if (strcmp(action, "WIFI_COMMIT") == 0) {
@@ -1060,6 +1127,11 @@ bool connectToConfiguredWiFi(unsigned long timeoutMs) {
 
   unsigned long startedAt = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startedAt < timeoutMs) {
+    processVehicleUart();
+    if (uartProvisionReceived) {
+      stopStaConnectionAttempt();
+      return false;
+    }
     delay(100);
     Serial.print(".");
   }
@@ -1116,135 +1188,33 @@ void maintainWiFiConnection(unsigned long now) {
   }
 }
 
-bool applyProvisionPayload(const String &body) {
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, body);
-  if (error) {
-    Serial.print("Provision JSON parse error: ");
-    Serial.println(error.c_str());
-    return false;
-  }
-
-  if (!(doc["ready"] | false)) return false;
-
-  const char *ssid = doc["ssid"] | "";
-  if (strlen(ssid) == 0) return false;
-
-  strlcpy(config.wifiSsid, ssid, sizeof(config.wifiSsid));
-  strlcpy(config.wifiPass, doc["password"] | "", sizeof(config.wifiPass));
-  strlcpy(config.wsScheme, doc["wsScheme"] | config.wsScheme, sizeof(config.wsScheme));
-  strlcpy(config.wsHost, doc["wsHost"] | config.wsHost, sizeof(config.wsHost));
-  strlcpy(config.wsPort, doc["wsPort"] | config.wsPort, sizeof(config.wsPort));
-  strlcpy(config.wsPath, doc["wsPath"] | config.wsPath, sizeof(config.wsPath));
-  strlcpy(config.vehicleId, doc["vehicleId"] | config.vehicleId, sizeof(config.vehicleId));
-  strlcpy(config.authToken, doc["authToken"] | config.authToken, sizeof(config.authToken));
-  strlcpy(config.controlUrl, doc["controlUrl"] | config.controlUrl, sizeof(config.controlUrl));
-  saveConfig();
-
-  Serial.print("Provision saved from ESP32 vehicle: SSID=");
-  Serial.print(config.wifiSsid);
-  Serial.print(" passwordLength=");
-  Serial.println(strlen(config.wifiPass));
-  return true;
-}
-
-bool fetchProvisionFromVehicle() {
-  HTTPClient http;
-  http.begin("http://192.168.4.1/api/cam-provision");
-  int status = http.GET();
-  if (status != 200) {
-    http.end();
-    return false;
-  }
-
-  String body = http.getString();
-  http.end();
-  return applyProvisionPayload(body);
-}
-
-
-
-bool sendProvisionAckToVehicle(const char *message = "credentials_saved") {
-  if (WiFi.status() != WL_CONNECTED) return false;
-
-  HTTPClient http;
-  http.begin("http://192.168.4.1/api/cam-ack");
-  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-  int status = http.POST(String("status=saved&message=") + message);
-  http.end();
-
-  if (status == 200) {
-    Serial.println("Vehicle ACK endpoint confirmed. Camera may switch Wi-Fi.");
-    return true;
-  }
-
-  Serial.printf("Vehicle ACK failed, HTTP status=%d\n", status);
-  return false;
-}
-
-bool waitForVehicleProvision() {
-  Serial.println("Connecting to setup AP: FPV-Car-Setup");
-  beginStaConnection(SETUP_AP_SSID, DEVICE_AP_PASSWORD, false);
-
-  unsigned long apStartedAt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - apStartedAt < 30000) {
-    delay(250);
-    Serial.print(".");
-  }
-  Serial.println();
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Could not join FPV-Car-Setup.");
-    stopStaConnectionAttempt();
-    return false;
-  }
-
-  Serial.println("Joined FPV-Car-Setup. Waiting for vehicle provision...");
-  unsigned long provisionStartedAt = millis();
-  while (millis() - provisionStartedAt < 240000) {
-    if (fetchProvisionFromVehicle()) {
-      bool acked = sendProvisionAckToVehicle("initial_wifi_saved");
-      if (!acked) {
-        Serial.println("WiFi saved, but setup ACK failed. Retrying...");
-        for (int i = 0; i < 5 && !acked; ++i) {
-          delay(500);
-          acked = sendProvisionAckToVehicle("initial_wifi_saved");
-        }
-      }
-      return acked;
-    }
-    delay(1000);
-  }
-
-  Serial.println("Provision wait timed out.");
-  return false;
-}
-
-
 void setupWiFiManager() {
   if (connectToConfiguredWiFi(18000)) return;
 
-  while (true) {
-    Serial.println("Saved WiFi unavailable. Waiting for vehicle provisioning.");
-    if (!waitForVehicleProvision()) {
-      Serial.println("Provisioning unavailable. Restarting camera recovery flow...");
-      delay(1500);
-      ESP.restart();
-    }
-
-    WiFi.disconnect(true, false);
-    delay(300);
-    if (connectToConfiguredWiFi(25000)) return;
-
-    Serial.println("Provisioned WiFi failed. Returning to FPV-Car-Setup.");
+  Serial.println("Saved WiFi unavailable. Waiting for vehicle UART provisioning.");
+  while (!uartProvisionReceived) {
+    processVehicleUart();
+    delay(10);
   }
+
+  Serial.println("UART provisioning saved. Restarting camera on the new WiFi...");
+  delay(800);
+  ESP.restart();
 }
 
 void setup() {
   Serial.begin(115200);
+  vehicleUart.setRxBufferSize(2048);
+  vehicleUart.begin(
+    VEHICLE_UART_BAUD,
+    SERIAL_8N1,
+    PIN_VEHICLE_UART_RX,
+    PIN_VEHICLE_UART_TX
+  );
   delay(300);
   Serial.println();
   Serial.println("Booting FPV ESP32-CAM...");
+  Serial.println("Vehicle UART ready: RX=GPIO13 TX=GPIO14 baud=115200");
   pinMode(FLASH_LED_PIN, OUTPUT);
   digitalWrite(FLASH_LED_PIN, LOW);
   loadConfig();
@@ -1264,10 +1234,21 @@ void setup() {
 }
 
 void loop() {
+  processVehicleUart();
   webSocket.loop();
   server.handleClient();
 
   unsigned long now = millis();
+
+  if (
+    uartProvisionReceived &&
+    uartProvisionRestartAt > 0 &&
+    (long)(now - uartProvisionRestartAt) >= 0
+  ) {
+    Serial.println("Applying new UART provisioning after restart...");
+    delay(100);
+    ESP.restart();
+  }
 
   if (wifiSwitchPending && (long)(millis() - wifiSwitchAt) >= 0) {
     wifiSwitchPending = false;

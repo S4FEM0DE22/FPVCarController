@@ -27,10 +27,12 @@ static const int PIN_SERVO_TILT = 19;
 static const int PIN_LIGHT = 2;
 static const int PIN_BUZZER = 4;
 static const int PIN_BATTERY_ADC = 34;
+static const int PIN_CAM_UART_RX = 16;
+static const int PIN_CAM_UART_TX = 17;
+static const uint32_t CAM_UART_BAUD = 115200;
 
 static const int MOTOR_PWM_MAX = 255;
 static const char *SETUP_AP_SSID = "FPV-Car-Setup";
-static const char *HANDOFF_AP_SSID = "FPV-Car-Handoff";
 static const char *DEVICE_AP_PASSWORD = "12345678";
 // Safe limits for small plastic-gear 180-degree servos.
 static const int SERVO_PAN_MIN = 15;
@@ -73,6 +75,7 @@ Preferences prefs;
 WebSocketsClient webSocket;
 WebServer portalServer(80);
 DNSServer dnsServer;
+HardwareSerial cameraUart(2);
 Servo panServo;
 Servo tiltServo;
 VehicleConfig config;
@@ -93,6 +96,9 @@ bool setupSaveRequested = false;
 bool setupProvisionReady = false;
 volatile bool camProvisionAcked = false;
 String camProvisionAckMessage = "";
+String setupProvisionRequestId = "";
+String cameraUartBuffer = "";
+unsigned long lastCameraUartSendAt = 0;
 unsigned long camAckAt = 0;
 const unsigned long CAM_ACK_TIMEOUT_MS = 120000; // wait up to 2 minutes for camera
 bool setupConnectDone = false;
@@ -116,14 +122,16 @@ bool wifiTransactionArmed = false;
 bool wifiCandidateConnected = false;
 bool wifiFallbackInProgress = false;
 bool wifiCandidateStatusSent = false;
-bool wifiHandoffApActive = false;
-bool wifiLocalCameraPrepared = false;
-bool wifiLocalApplyAuthorized = false;
+bool wifiUartCameraPrepared = false;
+bool wifiUartCameraArmed = false;
+bool wifiVehicleCommitted = false;
 unsigned long wifiTransactionStartedAt = 0;
 const unsigned long WIFI_COMMIT_TIMEOUT_MS = 60000;
+const unsigned long WIFI_UART_RETRY_MS = 900;
 
 void sendDeviceLog(const char *level, const String &message);
 void handleResetWiFi();
+void processCameraUart();
 
 String deviceName() {
   uint64_t chipId = ESP.getEfuseMac();
@@ -374,9 +382,6 @@ void clearPersistedWifiCandidate() {
 }
 
 void clearWifiTransaction() {
-  if (wifiHandoffApActive) {
-    WiFi.softAPdisconnect(false);
-  }
   wifiTransactionCommandId = "";
   wifiCandidateSsid = "";
   wifiCandidatePass = "";
@@ -387,9 +392,9 @@ void clearWifiTransaction() {
   wifiCandidateConnected = false;
   wifiFallbackInProgress = false;
   wifiCandidateStatusSent = false;
-  wifiHandoffApActive = false;
-  wifiLocalCameraPrepared = false;
-  wifiLocalApplyAuthorized = false;
+  wifiUartCameraPrepared = false;
+  wifiUartCameraArmed = false;
+  wifiVehicleCommitted = false;
   wifiTransactionStartedAt = 0;
   wifiSwitchPending = false;
   wifiSwitchInProgress = false;
@@ -422,6 +427,130 @@ void sendWifiCandidateStatus(const char *state, const String &message) {
   doc["message"] = message;
   doc["timestamp"] = millis();
   sendJsonDocument(doc);
+}
+
+void sendCameraUartDocument(JsonDocument &doc) {
+  serializeJson(doc, cameraUart);
+  cameraUart.write('\n');
+  cameraUart.flush();
+  lastCameraUartSendAt = millis();
+}
+
+void sendCameraProvisionUart() {
+  if (!setupProvisionReady || setupProvisionRequestId.length() == 0) return;
+  JsonDocument doc;
+  doc["type"] = "provision";
+  doc["requestId"] = setupProvisionRequestId;
+  doc["ssid"] = config.wifiSsid;
+  doc["password"] = config.wifiPass;
+  doc["wsScheme"] = config.wsScheme;
+  doc["wsHost"] = config.wsHost;
+  doc["wsPort"] = config.wsPort;
+  doc["wsPath"] = config.wsPath;
+  doc["vehicleId"] = config.vehicleId;
+  doc["authToken"] = config.authToken;
+  doc["controlUrl"] = config.controlUrl;
+  sendCameraUartDocument(doc);
+}
+
+void sendCameraWifiUart(
+  const char *action,
+  const String &commandId,
+  unsigned long delayMs = 0,
+  const char *reason = ""
+) {
+  if (commandId.length() == 0) return;
+  JsonDocument doc;
+  doc["type"] = "wifi_action";
+  doc["action"] = action;
+  doc["commandId"] = commandId;
+  if (strcmp(action, "prepare") == 0) {
+    doc["ssid"] = wifiCandidateSsid;
+    doc["password"] = wifiCandidatePass;
+  }
+  if (delayMs > 0) doc["delayMs"] = delayMs;
+  if (reason && strlen(reason) > 0) doc["reason"] = reason;
+  sendCameraUartDocument(doc);
+}
+
+void forwardCameraWifiPhase(
+  const char *phase,
+  bool ok,
+  const String &ssid,
+  const String &message
+) {
+  if (!wsConnected || wifiTransactionCommandId.length() == 0) return;
+  JsonDocument doc;
+  doc["type"] = "wifi_uart_camera_phase";
+  doc["vehicleId"] = config.vehicleId;
+  doc["commandId"] = wifiTransactionCommandId;
+  doc["phase"] = phase;
+  doc["ok"] = ok;
+  doc["ssid"] = ssid;
+  doc["message"] = message;
+  doc["timestamp"] = millis();
+  sendJsonDocument(doc);
+}
+
+void handleCameraUartLine(const String &line) {
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, line);
+  if (error) {
+    Serial.print("Camera UART JSON error: ");
+    Serial.println(error.c_str());
+    return;
+  }
+
+  const char *type = doc["type"] | "";
+  if (strcmp(type, "provision_ack") == 0) {
+    String requestId = doc["requestId"] | "";
+    if (
+      setupProvisionReady &&
+      requestId == setupProvisionRequestId &&
+      (doc["ok"] | false)
+    ) {
+      camProvisionAcked = true;
+      camProvisionAckMessage = String(doc["message"] | "camera saved UART provision");
+      camAckAt = millis();
+      Serial.println("ESP32-CAM UART provisioning ACK received.");
+    }
+    return;
+  }
+
+  if (strcmp(type, "wifi_ack") != 0) return;
+  String commandId = doc["commandId"] | "";
+  if (commandId != wifiTransactionCommandId) return;
+
+  String phase = doc["phase"] | "";
+  String ssid = doc["ssid"] | wifiCandidateSsid;
+  String message = doc["message"] | "camera UART acknowledgement";
+  bool ok = doc["ok"] | false;
+  if (phase == "prepared" && ok) wifiUartCameraPrepared = true;
+  if (phase == "armed" && ok) wifiUartCameraArmed = true;
+  forwardCameraWifiPhase(phase.c_str(), ok, ssid, message);
+
+  if (phase == "committed" && ok && wifiVehicleCommitted) {
+    clearWifiTransaction();
+  }
+}
+
+void processCameraUart() {
+  while (cameraUart.available() > 0) {
+    char value = (char)cameraUart.read();
+    if (value == '\r') continue;
+    if (value == '\n') {
+      if (cameraUartBuffer.length() > 0) {
+        handleCameraUartLine(cameraUartBuffer);
+        cameraUartBuffer = "";
+      }
+      continue;
+    }
+    if (cameraUartBuffer.length() < 1200) {
+      cameraUartBuffer += value;
+    } else {
+      cameraUartBuffer = "";
+    }
+  }
 }
 
 void restoreActiveWifi(const char *reason) {
@@ -652,15 +781,9 @@ void prepareWifiCandidate(JsonObject payload, const char *commandId) {
   wifiTransactionPrepared = true;
   wifiTransactionStartedAt = millis();
   persistWifiCandidate("prepared");
-  WiFi.mode(WIFI_AP_STA);
-  wifiHandoffApActive = WiFi.softAP(HANDOFF_AP_SSID, DEVICE_AP_PASSWORD);
-  if (!wifiHandoffApActive) {
-    sendWifiPhase("prepared", false, "vehicle could not start local WiFi handoff");
-    clearWifiTransaction();
-    return;
-  }
+  sendCameraWifiUart("prepare", wifiTransactionCommandId);
   sendWifiPhase("prepared", true, "vehicle stored WiFi candidate");
-  sendStatus("WiFi candidate prepared; waiting for camera local handoff");
+  sendStatus("WiFi candidate prepared; waiting for camera UART ACK");
   stopDrive();
 }
 
@@ -673,10 +796,29 @@ void armWifiCandidate(const char *commandId) {
     return;
   }
   wifiTransactionArmed = true;
-  wifiLocalApplyAuthorized = true;
   wifiTransactionStartedAt = millis();
   persistWifiCandidate("armed");
+  sendCameraWifiUart("arm", wifiTransactionCommandId);
   sendWifiPhase("armed", true, "vehicle ready for coordinated switch");
+}
+
+void startWifiCandidateSwitch(const char *commandId) {
+  if (
+    !wifiTransactionArmed ||
+    !wifiUartCameraArmed ||
+    !commandId ||
+    wifiTransactionCommandId != commandId
+  ) {
+    sendWifiPhase("switching", false, "camera did not confirm UART arm");
+    return;
+  }
+
+  const unsigned long switchDelayMs = 3000;
+  sendCameraWifiUart("switch", wifiTransactionCommandId, switchDelayMs);
+  wifiSwitchPending = true;
+  wifiSwitchAt = millis() + switchDelayMs;
+  wifiTransactionStartedAt = millis();
+  sendWifiPhase("switching", true, "coordinated WiFi switch scheduled over UART");
 }
 
 void commitWifiCandidate(const char *commandId) {
@@ -687,13 +829,17 @@ void commitWifiCandidate(const char *commandId) {
   ) {
     return;
   }
+  sendCameraWifiUart("commit", wifiTransactionCommandId);
   saveConfig();
+  wifiVehicleCommitted = true;
+  wifiTransactionStartedAt = millis();
+  persistWifiCandidate("committed");
   sendWifiPhase("committed", true, "vehicle committed active WiFi");
-  clearWifiTransaction();
 }
 
 void rollbackWifiCandidate(const char *commandId, const char *reason) {
   if (!commandId || wifiTransactionCommandId != commandId) return;
+  sendCameraWifiUart("rollback", wifiTransactionCommandId, 0, reason);
   if (wifiCandidateConnected || wifiSwitchInProgress || wifiTransactionArmed) {
     restoreActiveWifi(reason);
     return;
@@ -753,6 +899,8 @@ void handleAction(JsonDocument &doc) {
     prepareWifiCandidate(payload, commandId);
   } else if (strcmp(action, "WIFI_APPLY") == 0) {
     armWifiCandidate(commandId);
+  } else if (strcmp(action, "WIFI_SWITCH") == 0) {
+    startWifiCandidateSwitch(commandId);
   } else if (strcmp(action, "WIFI_COMMIT") == 0) {
     commitWifiCandidate(commandId);
   } else if (strcmp(action, "WIFI_ROLLBACK") == 0) {
@@ -859,65 +1007,6 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   }
 }
 
-bool isCurrentWifiHandoffRequest() {
-  return wifiTransactionPrepared &&
-    portalServer.hasArg("commandId") &&
-    portalServer.arg("commandId") == wifiTransactionCommandId;
-}
-
-void sendWifiCandidateToCamera() {
-  if (!isCurrentWifiHandoffRequest()) {
-    portalServer.send(409, "application/json", "{\"ready\":false}");
-    return;
-  }
-
-  JsonDocument doc;
-  doc["ready"] = true;
-  doc["commandId"] = wifiTransactionCommandId;
-  doc["ssid"] = wifiCandidateSsid;
-  doc["password"] = wifiCandidatePass;
-  String body;
-  serializeJson(doc, body);
-  portalServer.send(200, "application/json", body);
-}
-
-void handleWifiCandidateAck() {
-  if (!isCurrentWifiHandoffRequest()) {
-    portalServer.send(409, "application/json", "{\"ok\":false}");
-    return;
-  }
-
-  wifiLocalCameraPrepared = true;
-  JsonDocument ready;
-  ready["type"] = "wifi_local_camera_ready";
-  ready["vehicleId"] = config.vehicleId;
-  ready["commandId"] = wifiTransactionCommandId;
-  ready["ssid"] = wifiCandidateSsid;
-  ready["timestamp"] = millis();
-  sendJsonDocument(ready);
-  portalServer.send(200, "application/json", "{\"ok\":true}");
-}
-
-void sendWifiLocalApplyState() {
-  if (!isCurrentWifiHandoffRequest()) {
-    portalServer.send(409, "application/json", "{\"apply\":false}");
-    return;
-  }
-
-  const bool apply = wifiLocalCameraPrepared && wifiLocalApplyAuthorized;
-  if (apply && !wifiSwitchPending && !wifiSwitchInProgress) {
-    wifiSwitchPending = true;
-    wifiSwitchAt = millis() + 2500;
-  }
-
-  JsonDocument doc;
-  doc["apply"] = apply;
-  doc["delayMs"] = 2500;
-  String body;
-  serializeJson(doc, body);
-  portalServer.send(200, "application/json", body);
-}
-
 void setupPortalRedirect() {
   portalServer.on("/", []() {
     portalServer.sendHeader("Location", config.controlUrl, true);
@@ -925,9 +1014,6 @@ void setupPortalRedirect() {
   });
 
   portalServer.on("/reset-wifi", handleResetWiFi);
-  portalServer.on("/api/wifi-candidate", HTTP_GET, sendWifiCandidateToCamera);
-  portalServer.on("/api/wifi-candidate-ack", HTTP_POST, handleWifiCandidateAck);
-  portalServer.on("/api/wifi-apply", HTTP_GET, sendWifiLocalApplyState);
 
   portalServer.begin();
 }
@@ -1045,10 +1131,10 @@ void sendSetupStatus() {
     doc["message"] = setupLastError;
   } else if (camProvisionAcked) {
     doc["phase"] = "connecting";
-    doc["message"] = "ESP32-CAM รับค่าแล้ว กำลังเชื่อมต่อ Wi-Fi";
+    doc["message"] = "ESP32-CAM รับค่าผ่านสาย UART แล้ว กำลังเชื่อมต่อ Wi-Fi";
   } else if (setupProvisionReady) {
     doc["phase"] = "waiting_camera";
-    doc["message"] = "บันทึกแล้ว กำลังรอ ESP32-CAM รับค่า";
+    doc["message"] = "บันทึกแล้ว กำลังรอ ESP32-CAM ยืนยันผ่านสาย UART";
   } else {
     doc["phase"] = "idle";
     doc["message"] = "รอการตั้งค่า";
@@ -1072,26 +1158,6 @@ void handleResetWiFi() {
   prefs.end();
   WiFi.disconnect(true, true);
   ESP.restart();
-}
-
-void sendCamProvision() {
-  JsonDocument doc;
-  doc["ready"] = setupProvisionReady;
-  if (setupProvisionReady) {
-    doc["ssid"] = config.wifiSsid;
-    doc["password"] = config.wifiPass;
-    doc["wsScheme"] = config.wsScheme;
-    doc["wsHost"] = config.wsHost;
-    doc["wsPort"] = config.wsPort;
-    doc["wsPath"] = config.wsPath;
-    doc["vehicleId"] = config.vehicleId;
-    doc["authToken"] = config.authToken;
-    doc["controlUrl"] = config.controlUrl;
-  }
-
-  String body;
-  serializeJson(doc, body);
-  portalServer.send(200, "application/json", body);
 }
 
 void handleSetupSave() {
@@ -1128,38 +1194,20 @@ void handleSetupSave() {
   camAckAt = 0;
   setupSaveRequested = true;
   setupProvisionReady = true;
+  setupProvisionRequestId = String("setup-") + String(millis(), HEX);
   setupSavedAt = millis();
   setupLastError = "";
-  Serial.println("Setup saved. Provision payload is ready for ESP32-CAM.");
+  sendCameraProvisionUart();
+  Serial.println("Setup saved. Provision payload sent to ESP32-CAM over UART.");
 
   portalServer.send(200, "text/html; charset=utf-8",
                     "<!doctype html><html lang='th'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
                     "<title>กำลังเชื่อมต่อ</title><style>body{font-family:system-ui;margin:0;background:#eef2f3;color:#172033}main{max-width:560px;margin:0 auto;padding:34px 18px}.box{background:white;border:1px solid #d8e0e5;border-radius:8px;padding:22px}.loader{width:28px;height:28px;border:4px solid #d1fae5;border-top-color:#059669;border-radius:50%;animation:r 1s linear infinite}@keyframes r{to{transform:rotate(360deg)}}h1{font-size:21px}p{line-height:1.6;color:#475569}.state{margin-top:18px;padding:12px;background:#f1f5f9;border-radius:6px;font-weight:650}.back{display:inline-block;margin-top:16px;color:#047857}</style>"
-                    "<main><div class='box'><div class='loader' id='loader'></div><h1>กำลังตั้งค่าสองบอร์ด</h1><p>เปิดไฟ ESP32 และ ESP32-CAM ไว้ ระบบกำลังส่งและตรวจสอบค่า Wi-Fi</p><div class='state' id='state'>กำลังรอ ESP32-CAM...</div><a class='back' href='/'>กลับไปแก้ไขค่า</a></div></main>"
+                    "<main><div class='box'><div class='loader' id='loader'></div><h1>กำลังตั้งค่าสองบอร์ด</h1><p>เปิดไฟ ESP32 และ ESP32-CAM ไว้ ระบบกำลังส่งค่าผ่านสาย UART และตรวจสอบ Wi-Fi</p><div class='state' id='state'>กำลังรอ ESP32-CAM...</div><a class='back' href='/'>กลับไปแก้ไขค่า</a></div></main>"
                     "<script>async function check(){try{const r=await fetch('/api/setup-status',{cache:'no-store'});const s=await r.json();document.getElementById('state').textContent=s.message;if(s.phase==='connected'){document.getElementById('loader').style.display='none';return}}catch(e){document.getElementById('state').textContent='การเชื่อมต่อกับ FPV-Car-Setup สิ้นสุดแล้ว ลองเปิดหน้าเว็บควบคุม'}setTimeout(check,1000)}check()</script></html>");
 }
 
 
-
-void handleCamAck() {
-  if (!setupProvisionReady) {
-    portalServer.send(409, "application/json", "{\"ok\":false,\"error\":\"no_provision_ready\"}");
-    return;
-  }
-
-  String status = portalServer.hasArg("status") ? portalServer.arg("status") : "saved";
-  String message = portalServer.hasArg("message") ? portalServer.arg("message") : "";
-
-  if (status == "saved" || status == "ok" || status == "ready") {
-    camProvisionAcked = true;
-    camProvisionAckMessage = message;
-    camAckAt = millis();
-    Serial.println("ESP32-CAM ACK received: " + status);
-    portalServer.send(200, "application/json", "{\"ok\":true,\"action\":\"vehicle_may_switch\"}");
-  } else {
-    portalServer.send(400, "application/json", "{\"ok\":false,\"error\":\"bad_status\"}");
-  }
-}
 
 void startSetupPortal() {
   setupSaveRequested = false;
@@ -1169,6 +1217,7 @@ void startSetupPortal() {
   setupSavedAt = 0;
   camProvisionAcked = false;
   camProvisionAckMessage = "";
+  setupProvisionRequestId = "";
   camAckAt = 0;
 
   WiFi.mode(WIFI_AP_STA);
@@ -1181,8 +1230,6 @@ void startSetupPortal() {
   portalServer.on("/", HTTP_GET, sendSetupPage);
   portalServer.on("/save", HTTP_POST, handleSetupSave);
   portalServer.on("/api/setup-status", HTTP_GET, sendSetupStatus);
-  portalServer.on("/api/cam-provision", HTTP_GET, sendCamProvision);
-  portalServer.on("/api/cam-ack", HTTP_POST, handleCamAck);
   portalServer.on("/reset-wifi", HTTP_GET, handleResetWiFi);
   portalServer.onNotFound([]() {
     portalServer.sendHeader("Location", "http://192.168.4.1/", true);
@@ -1194,9 +1241,17 @@ void startSetupPortal() {
   while (true) {
     dnsServer.processNextRequest();
     portalServer.handleClient();
+    processCameraUart();
 
-    // Do NOT switch the vehicle yet. Keep the setup AP alive so the camera can
-    // join it, pull the new credentials, save them, and send an ACK.
+    if (
+      setupProvisionReady &&
+      !camProvisionAcked &&
+      millis() - lastCameraUartSendAt >= WIFI_UART_RETRY_MS
+    ) {
+      sendCameraProvisionUart();
+    }
+
+    // Keep the setup AP alive until the camera confirms the UART payload.
     if (setupProvisionReady && !camProvisionAcked) {
       if (millis() - setupSavedAt > CAM_ACK_TIMEOUT_MS) {
         Serial.println("Timed out waiting for ESP32-CAM ACK. Keeping setup portal open.");
@@ -1310,9 +1365,12 @@ void testServosOnBoot() {
 
 void setup() {
   Serial.begin(115200);
+  cameraUart.setRxBufferSize(2048);
+  cameraUart.begin(CAM_UART_BAUD, SERIAL_8N1, PIN_CAM_UART_RX, PIN_CAM_UART_TX);
   delay(300);
   Serial.println();
   Serial.println("Booting FPV Car ESP32...");
+  Serial.println("ESP32-CAM UART ready: RX=GPIO16 TX=GPIO17 baud=115200");
   loadConfig();
   clearPersistedWifiCandidate();
   panServo.setPeriodHertz(50);
@@ -1333,11 +1391,34 @@ void setup() {
 }
 
 void loop() {
+  processCameraUart();
   webSocket.loop();
   portalServer.handleClient();
   processWifiScan();
 
   unsigned long now = millis();
+
+  if (
+    wifiTransactionPrepared &&
+    !wifiUartCameraPrepared &&
+    !wifiTransactionArmed &&
+    now - lastCameraUartSendAt >= WIFI_UART_RETRY_MS
+  ) {
+    sendCameraWifiUart("prepare", wifiTransactionCommandId);
+  } else if (
+    wifiTransactionArmed &&
+    !wifiUartCameraArmed &&
+    !wifiSwitchPending &&
+    !wifiSwitchInProgress &&
+    now - lastCameraUartSendAt >= WIFI_UART_RETRY_MS
+  ) {
+    sendCameraWifiUart("arm", wifiTransactionCommandId);
+  } else if (
+    wifiVehicleCommitted &&
+    now - lastCameraUartSendAt >= WIFI_UART_RETRY_MS
+  ) {
+    sendCameraWifiUart("commit", wifiTransactionCommandId);
+  }
 
   if (wifiSwitchPending && (long)(millis() - wifiSwitchAt) >= 0) {
     wifiSwitchPending = false;
@@ -1394,6 +1475,7 @@ void loop() {
   }
   if (
     wifiTransactionArmed &&
+    !wifiVehicleCommitted &&
     !wifiFallbackInProgress &&
     now - wifiTransactionStartedAt > WIFI_COMMIT_TIMEOUT_MS
   ) {

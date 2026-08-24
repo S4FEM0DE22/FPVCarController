@@ -15,6 +15,20 @@ Install these from Arduino IDE Library Manager:
 
 Also install the ESP32 board package in Arduino IDE.
 
+## UART Wiring Between Boards
+
+Connect the boards before powering the car:
+
+| ESP32 vehicle | ESP32-CAM (AI Thinker) | Purpose |
+| --- | --- | --- |
+| GPIO17 (TX2) | GPIO13 (RX1) | Vehicle sends configuration and commands |
+| GPIO16 (RX2) | GPIO14 (TX1) | Camera sends acknowledgements |
+| GND | GND | Shared signal reference |
+
+UART uses 3.3 V logic. Do not connect either UART pin to 5 V. GPIO13 and GPIO14 on the ESP32-CAM are available only when the microSD interface is not used. Power for both boards still comes from the regulated supply; UART does not power the camera.
+
+The link runs at `115200 8N1`. The sketches assign UART pins explicitly, so the USB Serial Monitor remains available on the normal programming port.
+
 ## First-Time Shared Wi-Fi Setup
 
 Use this flow when the ESP32 vehicle and ESP32-CAM have no saved Wi-Fi yet:
@@ -39,13 +53,13 @@ The selected hotspot must use 2.4 GHz and allow at least two connected devices. 
 
 After saving:
 
-- ESP32-CAM fetches the complete configuration from `FPV-Car-Setup`.
-- The camera temporarily joins the target Wi-Fi to verify the credentials, returns to the setup AP, and sends a verified ACK.
-- Only after that ACK does the main ESP32 join the target Wi-Fi; the camera then follows with the same saved configuration.
+- The main ESP32 sends the complete configuration to ESP32-CAM over UART.
+- ESP32-CAM saves the configuration and returns an ACK over UART.
+- Only after that ACK does the main ESP32 join the target Wi-Fi. ESP32-CAM restarts and joins the same saved Wi-Fi.
 - The progress page shows whether the camera has received the settings and whether the vehicle connected successfully.
 - If the password is incorrect, the setup network remains available so the value can be corrected.
 
-On later boots, the hidden `FPV-Car-Sync` channel lets the camera verify that both saved configurations match before both boards connect.
+On later boots, both boards use their saved configuration immediately. They do not need to exchange Wi-Fi credentials again unless the network is changed or reset.
 
 ## ESP32 Vehicle Setup
 
@@ -69,7 +83,7 @@ Default TB6612FNG pins are declared at the top of the sketch. Change them to mat
 1. Open `esp32-cam/esp32-cam.ino`.
 2. Select `AI Thinker ESP32-CAM`, then flash it.
 3. Power it on together with the ESP32 vehicle during first-time setup.
-4. The ESP32-CAM does not open its own setup portal. It receives the vehicle configuration through the temporary `FPV-Car-Setup` network, acknowledges the save, and then both boards join the same network once.
+4. The ESP32-CAM does not open its own setup portal. It receives the vehicle configuration over UART, acknowledges the save, and then both boards join the same network.
 5. After saving Wi-Fi, open the camera IP. It redirects to:
 
 ```text
@@ -93,13 +107,14 @@ Deploy the updated relay and web app before flashing this ESP32-CAM firmware. Th
 The controller page can change Wi-Fi for both boards from one form:
 
 - The web app sends `WIFI_SCAN` through the cloud relay. The ESP32 scans nearby 2.4 GHz networks and returns SSID, signal strength, channel, and security status for the selection list.
-- The web app sends one `WIFI_SET` request. The relay sends the candidate credentials only to the main ESP32 and tells ESP32-CAM to enter local receive mode without including the SSID or password.
-- The main ESP32 keeps its current cloud connection and opens a temporary `FPV-Car-Handoff` access point. ESP32-CAM pauses frames, disconnects temporarily, and downloads the candidate directly from the vehicle.
-- ESP32-CAM acknowledges the candidate to the vehicle over the temporary network. The relay then authorizes apply, and the camera polls the vehicle for the coordinated switch time.
+- The web app sends one `WIFI_SET` request. The relay sends the candidate credentials only to the main ESP32.
+- The main ESP32 keeps its current cloud connection and forwards the candidate to ESP32-CAM over UART. ESP32-CAM pauses cloud frames during the transaction.
+- ESP32-CAM acknowledges `prepared` and `armed` over UART. The main ESP32 forwards those acknowledgements to the relay, which then sends one coordinated switch command.
 - Both boards retain their previous active credentials while testing the candidate network.
-- The relay sends `WIFI_COMMIT` only after both boards report that they are online through the selected SSID. Only then does each board save the candidate as its active Wi-Fi.
+- The relay sends `WIFI_COMMIT` to the main ESP32 only after both boards report that they are online through the selected SSID and gateway. The main ESP32 commits locally and forwards the commit to ESP32-CAM over UART.
+- The controller reports success only after both boards acknowledge the commit.
 - If a board fails to prepare, connect, or return to the relay before the timeout, `WIFI_ROLLBACK` restores the previous network. A local commit timeout provides the same recovery if the relay becomes unavailable.
-- ESP32-CAM pauses cloud frames during the transaction so camera traffic cannot delay Wi-Fi coordination.
+- The main ESP32 retries UART messages until the matching camera ACK arrives, so the camera can start slightly later without losing the request.
 - The controller does not need direct access to the camera IP, so the change also works when the browser and car use different networks.
 - Settings compares the SSID and gateway reported by both boards and shows whether they are on the same Wi-Fi.
 
