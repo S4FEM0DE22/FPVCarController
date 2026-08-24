@@ -131,7 +131,6 @@ export default function SettingsPanel({
       vehicleWifiGateway === cameraWifiGateway);
   const networkReady =
     vehicleOnline &&
-    cameraOnline &&
     Boolean(selectedNetwork) &&
     (!selectedNetwork?.secure || password.length > 0);
 
@@ -174,11 +173,11 @@ export default function SettingsPanel({
     try {
       await onChangeWifi(nextSsid, password);
       setMessage(
-        "กล้องยืนยันการเชื่อม Wi-Fi ใหม่แล้ว ระบบกำลังย้าย ESP32 หลักไปเครือข่ายเดียวกัน"
+        "รถและกล้องบันทึก Wi-Fi ชุดเดียวกันแล้ว กำลังย้ายไปเครือข่ายใหม่"
       );
       setPassword("");
     } catch {
-      setMessage("ส่งค่า Wi-Fi ไม่สำเร็จ กล้องอาจเชื่อมเครือข่ายใหม่หรือกลับเข้า Cloud ไม่ได้");
+      setMessage("ส่งค่า Wi-Fi ไม่สำเร็จ ตรวจว่าเปิดกล้องและจับคู่ ESP-NOW แล้ว จากนั้นลองอีกครั้ง");
     } finally {
       setSubmitting(false);
     }
@@ -407,7 +406,7 @@ export default function SettingsPanel({
                   <h3 className="text-sm font-semibold text-neutral-800">เปลี่ยน Wi-Fi ของรถและกล้อง</h3>
                 </div>
                 <p className="mb-3 text-xs leading-5 text-slate-500">
-                  ระบบจะให้ ESP32-CAM ทดสอบเครือข่ายใหม่ผ่าน Cloud ก่อน แล้วจึงย้าย ESP32 หลักตาม
+                  Cloud ส่งค่าให้ ESP32 หลักครั้งเดียว จากนั้นรถส่งต่อให้กล้องผ่าน ESP-NOW และทั้งคู่จึงเปลี่ยนพร้อมกัน
                 </p>
 
                 <div className="space-y-3">
@@ -555,7 +554,7 @@ export default function SettingsPanel({
                   ) : null}
 
                   <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-950">
-                    ต้องให้ทั้งสองบอร์ดออนไลน์ และตั้ง Hotspot ให้รับได้อย่างน้อย 2 อุปกรณ์
+                    เปิด ESP32-CAM ไว้ใกล้รถ และตั้ง Hotspot ให้รับได้อย่างน้อย 2 อุปกรณ์
                   </div>
 
                   <button
@@ -567,8 +566,6 @@ export default function SettingsPanel({
                       ? "กำลังส่งค่า..."
                       : !vehicleOnline
                       ? "รอ ESP32 ออนไลน์"
-                      : !cameraOnline
-                      ? "รอ ESP32-CAM ออนไลน์"
                       : selectedNetwork
                       ? `ใช้ ${selectedNetwork.ssid} กับรถและกล้อง`
                       : "เลือก Wi-Fi ก่อน"}

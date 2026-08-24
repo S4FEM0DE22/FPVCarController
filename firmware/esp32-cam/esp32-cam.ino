@@ -6,6 +6,7 @@
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WebSocketsClient.h>
+#include <esp_now.h>
 
 // Required library:
 // - ArduinoJson by Benoit Blanchon
@@ -34,6 +35,31 @@ static const char *SETUP_AP_SSID = "FPV-Car-Setup";
 static const char *SYNC_AP_SSID = "FPV-Car-Sync";
 static const char *DEVICE_AP_PASSWORD = "12345678";
 
+static const uint32_t WIFI_SYNC_MAGIC = 0x46505657;
+static const uint8_t WIFI_SYNC_VERSION = 1;
+static const uint8_t WIFI_SYNC_PREPARE = 1;
+static const uint8_t WIFI_SYNC_PREPARE_ACK = 2;
+static const uint8_t WIFI_SYNC_APPLY = 3;
+static const uint8_t WIFI_SYNC_APPLY_ACK = 4;
+static const uint8_t ESPNOW_PMK[ESP_NOW_KEY_LEN] = {
+  0x46, 0x50, 0x56, 0x2d, 0x43, 0x41, 0x52, 0x2d,
+  0x50, 0x4d, 0x4b, 0x2d, 0x32, 0x30, 0x32, 0x36
+};
+static const uint8_t ESPNOW_LMK[ESP_NOW_KEY_LEN] = {
+  0x53, 0x48, 0x41, 0x52, 0x45, 0x44, 0x2d, 0x57,
+  0x49, 0x46, 0x49, 0x2d, 0x4c, 0x4d, 0x4b, 0x31
+};
+
+struct __attribute__((packed)) WifiSyncPacket {
+  uint32_t magic;
+  uint8_t version;
+  uint8_t type;
+  uint16_t reserved;
+  uint32_t transactionId;
+  char ssid[64];
+  char password[96];
+};
+
 struct CamConfig {
   char wifiSsid[64] = "";
   char wifiPass[96] = "";
@@ -46,6 +72,7 @@ struct CamConfig {
   char vehicleId[32] = "car-001";
   char authToken[96] = "";
   char streamProfile[16] = "balanced";
+  char vehiclePeerMac[18] = "";
 };
 
 Preferences prefs;
@@ -57,7 +84,6 @@ bool cameraReady = false;
 bool cameraHasPsram = false;
 bool flashOn = false;
 bool wsConnected = false;
-uint32_t wsConnectionGeneration = 0;
 bool cloudMotionMode = false;
 bool wifiSwitchPending = false;
 unsigned long wifiSwitchAt = 0;
@@ -68,15 +94,6 @@ const unsigned long WIFI_RECONNECT_INTERVAL_MS = 5000;
 const unsigned long BOOT_SYNC_DISCOVERY_MS = 10000;
 unsigned long wifiDisconnectedAt = 0;
 unsigned long lastWifiReconnectAttemptAt = 0;
-bool cloudWifiUpdatePending = false;
-bool cloudWifiAwaitingAck = false;
-bool cloudWifiAckSent = false;
-String cloudWifiCommandId = "";
-String previousWifiSsid = "";
-String previousWifiPass = "";
-uint32_t cloudWifiRequiredWsGeneration = 0;
-unsigned long cloudWifiUpdateStartedAt = 0;
-const unsigned long CLOUD_WIFI_TRANSACTION_TIMEOUT_MS = 70000;
 unsigned long lastFrameAt = 0;
 unsigned long cloudMotionUntil = 0;
 unsigned long lastStatusAt = 0;
@@ -101,6 +118,15 @@ uint8_t cloudJpegQualityMin = 15;
 uint8_t cloudJpegQualityMax = 26;
 size_t cloudFrameTargetBytes = 32000;
 unsigned long cloudFrameTargetAckMs = 300;
+bool espNowReady = false;
+uint8_t vehiclePeerMac[6] = {};
+portMUX_TYPE espNowMux = portMUX_INITIALIZER_UNLOCKED;
+volatile bool espNowPacketReady = false;
+WifiSyncPacket espNowReceivedPacket = {};
+uint32_t preparedWifiTransactionId = 0;
+uint32_t appliedWifiTransactionId = 0;
+String preparedWifiSsid = "";
+String preparedWifiPass = "";
 
 String deviceName();
 String streamUrl();
@@ -173,6 +199,7 @@ void loadConfig() {
   prefs.getString("vehicleId", config.vehicleId, sizeof(config.vehicleId));
   prefs.getString("authToken", config.authToken, sizeof(config.authToken));
   prefs.getString("streamProfile", config.streamProfile, sizeof(config.streamProfile));
+  prefs.getString("vehicleMac", config.vehiclePeerMac, sizeof(config.vehiclePeerMac));
   prefs.end();
 }
 
@@ -189,7 +216,47 @@ void saveConfig() {
   prefs.putString("vehicleId", config.vehicleId);
   prefs.putString("authToken", config.authToken);
   prefs.putString("streamProfile", config.streamProfile);
+  prefs.putString("vehicleMac", config.vehiclePeerMac);
   prefs.end();
+}
+
+bool parseMacAddress(const String &text, uint8_t out[6]) {
+  unsigned int bytes[6];
+  if (sscanf(
+        text.c_str(),
+        "%x:%x:%x:%x:%x:%x",
+        &bytes[0], &bytes[1], &bytes[2],
+        &bytes[3], &bytes[4], &bytes[5]
+      ) != 6) {
+    return false;
+  }
+
+  bool anyNonZero = false;
+  for (int i = 0; i < 6; ++i) {
+    if (bytes[i] > 0xFF) return false;
+    out[i] = (uint8_t)bytes[i];
+    anyNonZero = anyNonZero || out[i] != 0;
+  }
+  return anyNonZero;
+}
+
+bool rememberVehiclePeerMac(const String &macText) {
+  uint8_t parsed[6];
+  if (!parseMacAddress(macText, parsed)) return false;
+
+  char buffer[18];
+  snprintf(
+    buffer, sizeof(buffer), "%02X:%02X:%02X:%02X:%02X:%02X",
+    parsed[0], parsed[1], parsed[2], parsed[3], parsed[4], parsed[5]
+  );
+  String normalized = buffer;
+  if (normalized != config.vehiclePeerMac) {
+    strlcpy(config.vehiclePeerMac, normalized.c_str(), sizeof(config.vehiclePeerMac));
+    saveConfig();
+    Serial.println("Saved vehicle ESP-NOW peer MAC: " + normalized);
+  }
+  memcpy(vehiclePeerMac, parsed, sizeof(vehiclePeerMac));
+  return true;
 }
 
 bool isValidCloudStreamProfile(const char *profile) {
@@ -506,45 +573,120 @@ void sendDeviceLog(const char *level, const String &message) {
   webSocket.sendTXT(payload);
 }
 
-bool sendWifiUpdateAck() {
-  if (!wsConnected || cloudWifiCommandId.length() == 0) return false;
+void onEspNowReceive(
+  const esp_now_recv_info_t *info,
+  const uint8_t *data,
+  int dataLength
+) {
+  if (!info || !data || dataLength != (int)sizeof(WifiSyncPacket)) return;
+  if (memcmp(info->src_addr, vehiclePeerMac, sizeof(vehiclePeerMac)) != 0) return;
 
-  JsonDocument doc;
-  doc["type"] = "wifi_update_ack";
-  doc["vehicleId"] = config.vehicleId;
-  doc["commandId"] = cloudWifiCommandId;
-  doc["ssid"] = config.wifiSsid;
-  doc["saved"] = true;
-  doc["connected"] = true;
-  doc["timestamp"] = millis();
+  WifiSyncPacket packet;
+  memcpy(&packet, data, sizeof(packet));
+  if (
+    packet.magic != WIFI_SYNC_MAGIC ||
+    packet.version != WIFI_SYNC_VERSION ||
+    (packet.type != WIFI_SYNC_PREPARE && packet.type != WIFI_SYNC_APPLY)
+  ) {
+    return;
+  }
 
-  String payload;
-  serializeJson(doc, payload);
-  return webSocket.sendTXT(payload);
+  portENTER_CRITICAL(&espNowMux);
+  espNowReceivedPacket = packet;
+  espNowPacketReady = true;
+  portEXIT_CRITICAL(&espNowMux);
 }
 
-void clearCloudWifiTransition() {
-  cloudWifiUpdatePending = false;
-  cloudWifiAwaitingAck = false;
-  cloudWifiAckSent = false;
-  cloudWifiCommandId = "";
-  previousWifiSsid = "";
-  previousWifiPass = "";
-  cloudWifiRequiredWsGeneration = 0;
-  cloudWifiUpdateStartedAt = 0;
+bool setupEspNow() {
+  if (!rememberVehiclePeerMac(config.vehiclePeerMac)) {
+    Serial.println("ESP-NOW unavailable: vehicle peer MAC is not paired yet.");
+    return false;
+  }
+
+  if (!espNowReady) {
+    if (esp_now_init() != ESP_OK) {
+      Serial.println("ESP-NOW initialization failed.");
+      return false;
+    }
+    esp_now_set_pmk(ESPNOW_PMK);
+    esp_now_register_recv_cb(onEspNowReceive);
+    espNowReady = true;
+  }
+
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, vehiclePeerMac, sizeof(vehiclePeerMac));
+  memcpy(peer.lmk, ESPNOW_LMK, ESP_NOW_KEY_LEN);
+  peer.channel = 0;
+  peer.ifidx = WIFI_IF_STA;
+  peer.encrypt = true;
+
+  esp_err_t result = esp_now_is_peer_exist(vehiclePeerMac)
+    ? esp_now_mod_peer(&peer)
+    : esp_now_add_peer(&peer);
+  if (result != ESP_OK) {
+    Serial.printf("ESP-NOW vehicle peer setup failed: %d\n", (int)result);
+    return false;
+  }
+
+  Serial.println("ESP-NOW vehicle peer ready: " + String(config.vehiclePeerMac));
+  return true;
 }
 
-void rollbackCloudWifiTransition(const char *reason) {
-  if (!cloudWifiUpdatePending) return;
+bool sendEspNowWifiAck(uint8_t type, uint32_t transactionId) {
+  if (!espNowReady && !setupEspNow()) return false;
 
-  Serial.print("Rolling camera WiFi back: ");
-  Serial.println(reason);
-  strlcpy(config.wifiSsid, previousWifiSsid.c_str(), sizeof(config.wifiSsid));
-  strlcpy(config.wifiPass, previousWifiPass.c_str(), sizeof(config.wifiPass));
-  clearCloudWifiTransition();
-  wifiSwitchInProgress = false;
-  wifiSwitchPending = true;
-  wifiSwitchAt = millis() + 500;
+  WifiSyncPacket packet = {};
+  packet.magic = WIFI_SYNC_MAGIC;
+  packet.version = WIFI_SYNC_VERSION;
+  packet.type = type;
+  packet.transactionId = transactionId;
+  return esp_now_send(
+    vehiclePeerMac,
+    reinterpret_cast<const uint8_t *>(&packet),
+    sizeof(packet)
+  ) == ESP_OK;
+}
+
+void processEspNowWifi(unsigned long now) {
+  WifiSyncPacket packet = {};
+  bool hasPacket = false;
+  portENTER_CRITICAL(&espNowMux);
+  if (espNowPacketReady) {
+    packet = espNowReceivedPacket;
+    espNowPacketReady = false;
+    hasPacket = true;
+  }
+  portEXIT_CRITICAL(&espNowMux);
+  if (!hasPacket) return;
+
+  packet.ssid[sizeof(packet.ssid) - 1] = '\0';
+  packet.password[sizeof(packet.password) - 1] = '\0';
+  if (packet.type == WIFI_SYNC_PREPARE) {
+    if (strlen(packet.ssid) == 0) return;
+    preparedWifiTransactionId = packet.transactionId;
+    preparedWifiSsid = packet.ssid;
+    preparedWifiPass = packet.password;
+    appliedWifiTransactionId = 0;
+    sendEspNowWifiAck(WIFI_SYNC_PREPARE_ACK, packet.transactionId);
+    Serial.println("ESP-NOW WiFi settings prepared; active WiFi is unchanged.");
+    return;
+  }
+
+  if (
+    packet.type == WIFI_SYNC_APPLY &&
+    packet.transactionId == preparedWifiTransactionId
+  ) {
+    if (appliedWifiTransactionId != packet.transactionId) {
+      strlcpy(config.wifiSsid, preparedWifiSsid.c_str(), sizeof(config.wifiSsid));
+      strlcpy(config.wifiPass, preparedWifiPass.c_str(), sizeof(config.wifiPass));
+      saveConfig();
+      appliedWifiTransactionId = packet.transactionId;
+      wifiSwitchPending = true;
+      wifiSwitchAt = now + 2500;
+      Serial.println("ESP-NOW WiFi apply saved; coordinated switch scheduled.");
+    }
+    sendEspNowWifiAck(WIFI_SYNC_APPLY_ACK, packet.transactionId);
+  }
 }
 
 void sendCameraStreamStatus(float fps) {
@@ -717,7 +859,6 @@ void sendCloudFrame() {
 void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   if (type == WStype_CONNECTED) {
     wsConnected = true;
-    wsConnectionGeneration++;
     cloudFrameSequence = 0;
     clearPendingCloudFrameAcks();
     Serial.print("Camera WebSocket connected: ");
@@ -786,40 +927,7 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
     if (strcmp(messageType, "action") == 0) {
       const char *action = doc["action"] | "";
       if (strcmp(action, "WIFI_SET") == 0) {
-        JsonObject actionPayload = doc["payload"].as<JsonObject>();
-        const char *ssid = actionPayload["ssid"] | "";
-        const char *password = actionPayload["password"] | "";
-        const char *commandId = doc["commandId"] | "";
-        if (strlen(ssid) == 0 || strlen(commandId) == 0) {
-          sendDeviceLog("warn", "Camera rejected invalid cloud WiFi update");
-          return;
-        }
-
-        previousWifiSsid = config.wifiSsid;
-        previousWifiPass = config.wifiPass;
-        strlcpy(config.wifiSsid, ssid, sizeof(config.wifiSsid));
-        strlcpy(config.wifiPass, password, sizeof(config.wifiPass));
-        cloudWifiCommandId = commandId;
-        cloudWifiUpdatePending = true;
-        cloudWifiAwaitingAck = false;
-        cloudWifiAckSent = false;
-        cloudWifiRequiredWsGeneration = wsConnectionGeneration + 1;
-        cloudWifiUpdateStartedAt = millis();
-        sendDeviceLog("info", "Camera testing the new WiFi before vehicle handoff");
-        wifiSwitchPending = true;
-        wifiSwitchAt = millis() + 700;
-      } else if (strcmp(action, "WIFI_COMMIT") == 0) {
-        const char *commandId = doc["commandId"] | "";
-        if (cloudWifiUpdatePending && cloudWifiCommandId == commandId) {
-          saveConfig();
-          clearCloudWifiTransition();
-          sendDeviceLog("info", "Camera committed shared WiFi transaction");
-        }
-      } else if (strcmp(action, "WIFI_ROLLBACK") == 0) {
-        const char *commandId = doc["commandId"] | "";
-        if (cloudWifiUpdatePending && cloudWifiCommandId == commandId) {
-          rollbackCloudWifiTransition("relay requested rollback");
-        }
+        sendDeviceLog("warn", "Cloud WIFI_SET ignored; vehicle ESP-NOW handoff is required");
       }
     }
     return;
@@ -998,6 +1106,7 @@ bool applyProvisionPayload(const String &body) {
   strlcpy(config.vehicleId, doc["vehicleId"] | config.vehicleId, sizeof(config.vehicleId));
   strlcpy(config.authToken, doc["authToken"] | config.authToken, sizeof(config.authToken));
   strlcpy(config.controlUrl, doc["controlUrl"] | config.controlUrl, sizeof(config.controlUrl));
+  rememberVehiclePeerMac(doc["vehicleMac"] | "");
   saveConfig();
 
   Serial.print("Provision saved from ESP32 vehicle: SSID=");
@@ -1009,7 +1118,8 @@ bool applyProvisionPayload(const String &body) {
 
 bool fetchProvisionFromVehicle() {
   HTTPClient http;
-  http.begin("http://192.168.4.1/api/cam-provision");
+  String url = String("http://192.168.4.1/api/cam-provision?camMac=") + WiFi.macAddress();
+  http.begin(url);
   int status = http.GET();
   if (status != 200) {
     http.end();
@@ -1028,7 +1138,8 @@ bool sendProvisionAckToVehicle(const char *message);
 
 bool checkVehicleWiFiMatch() {
   HTTPClient http;
-  http.begin("http://192.168.4.1/api/wifi-check");
+  String url = String("http://192.168.4.1/api/wifi-check?camMac=") + WiFi.macAddress();
+  http.begin(url);
   int status = http.GET();
   if (status != 200) {
     http.end();
@@ -1040,6 +1151,7 @@ bool checkVehicleWiFiMatch() {
 
   JsonDocument doc;
   if (deserializeJson(doc, body) || !(doc["ok"] | false)) return false;
+  rememberVehiclePeerMac(doc["vehicleMac"] | "");
 
   String vehicleSsid = doc["ssid"] | "";
   String vehicleFp = doc["fingerprint"] | "";
@@ -1147,34 +1259,9 @@ bool waitForVehicleProvision() {
   unsigned long provisionStartedAt = millis();
   while (millis() - provisionStartedAt < 240000) {
     if (fetchProvisionFromVehicle()) {
-      Serial.println("Testing provisioned WiFi before acknowledging the vehicle...");
-      if (!connectToConfiguredWiFi(15000)) {
-        Serial.println("Provisioned WiFi test failed. Returning to FPV-Car-Setup.");
-        beginStaConnection(SETUP_AP_SSID, DEVICE_AP_PASSWORD, false);
-        unsigned long retryStartedAt = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - retryStartedAt < 10000) {
-          delay(100);
-        }
-        continue;
-      }
-
-      Serial.println("Provisioned WiFi verified. Returning to setup AP for ACK...");
-      beginStaConnection(SETUP_AP_SSID, DEVICE_AP_PASSWORD, false);
-      unsigned long setupReturnStartedAt = millis();
-      while (
-        WiFi.status() != WL_CONNECTED &&
-        millis() - setupReturnStartedAt < 10000
-      ) {
-        delay(100);
-      }
-      if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Could not return to FPV-Car-Setup for verification ACK.");
-        return false;
-      }
-
       bool acked = sendProvisionAckToVehicle("initial_wifi_saved");
       if (!acked) {
-        Serial.println("WiFi verified, but setup ACK failed. Retrying...");
+        Serial.println("WiFi saved, but setup ACK failed. Retrying...");
         for (int i = 0; i < 5 && !acked; ++i) {
           delay(500);
           acked = sendProvisionAckToVehicle("initial_wifi_saved");
@@ -1228,6 +1315,7 @@ void setup() {
     strlcpy(config.streamProfile, "balanced", sizeof(config.streamProfile));
   }
   setupWiFiManager();
+  setupEspNow();
   cameraReady = setupCamera();
   setupRoutes();
   setupWebSocket();
@@ -1239,12 +1327,15 @@ void loop() {
   webSocket.loop();
   server.handleClient();
 
+  unsigned long now = millis();
+  processEspNowWifi(now);
+
   if (wifiSwitchPending && (long)(millis() - wifiSwitchAt) >= 0) {
     wifiSwitchPending = false;
     wifiSwitchInProgress = true;
     wifiSwitchStartedAt = millis();
     Serial.println("Switching ESP32-CAM to the newly saved WiFi...");
-    WiFi.disconnect(true, true);
+    WiFi.disconnect(false, false);
     delay(300);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
@@ -1255,35 +1346,15 @@ void loop() {
   maintainWiFiConnection(millis());
   sendCloudFrame();
 
-  unsigned long now = millis();
   if (wifiSwitchInProgress) {
     if (WiFi.status() == WL_CONNECTED) {
       wifiSwitchInProgress = false;
       Serial.println("ESP32-CAM connected to the new WiFi.");
-      if (cloudWifiUpdatePending) {
-        cloudWifiAwaitingAck = true;
-        Serial.println("Waiting for cloud reconnect before WiFi handoff ACK.");
-      }
+      setupEspNow();
     } else if (now - wifiSwitchStartedAt > WIFI_SWITCH_TIMEOUT_MS) {
-      if (cloudWifiUpdatePending) {
-        rollbackCloudWifiTransition("target WiFi connection failed");
-      } else {
-        Serial.println("New WiFi failed. Restarting camera recovery flow...");
-        ESP.restart();
-      }
+      Serial.println("New WiFi failed. Restarting camera recovery flow...");
+      ESP.restart();
     }
-  }
-  if (cloudWifiAwaitingAck &&
-      wsConnected &&
-      wsConnectionGeneration >= cloudWifiRequiredWsGeneration &&
-      sendWifiUpdateAck()) {
-    cloudWifiAwaitingAck = false;
-    cloudWifiAckSent = true;
-    Serial.println("Camera WiFi handoff ACK sent after cloud reconnect.");
-  }
-  if (cloudWifiUpdatePending &&
-      now - cloudWifiUpdateStartedAt > CLOUD_WIFI_TRANSACTION_TIMEOUT_MS) {
-    rollbackCloudWifiTransition("transaction timed out before commit");
   }
   if (cloudMotionMode && (long)(now - cloudMotionUntil) >= 0) {
     setCloudMotionMode(false);
