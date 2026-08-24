@@ -80,6 +80,7 @@ DriveState drive;
 BehaviorProfile behaviorProfile;
 
 bool wsConnected = false;
+uint32_t wsConnectionGeneration = 0;
 bool lightOn = false;
 bool cameraOn = true;
 int panDeg = SERVO_PAN_CENTER;
@@ -107,6 +108,14 @@ unsigned long wifiSwitchAt = 0;
 bool wifiSwitchInProgress = false;
 unsigned long wifiSwitchStartedAt = 0;
 const unsigned long WIFI_SWITCH_TIMEOUT_MS = 25000;
+bool cloudWifiUpdatePending = false;
+bool cloudWifiAwaitingAck = false;
+String cloudWifiCommandId = "";
+String previousWifiSsid = "";
+String previousWifiPass = "";
+uint32_t cloudWifiRequiredWsGeneration = 0;
+unsigned long cloudWifiUpdateStartedAt = 0;
+const unsigned long CLOUD_WIFI_TRANSACTION_TIMEOUT_MS = 70000;
 String setupLastError = "";
 bool wifiScanInProgress = false;
 String wifiScanRequestId = "";
@@ -261,8 +270,11 @@ void applyDrive(float throttle, float steering) {
   throttle = clampFloat(throttle, -1, 1);
   steering = clampFloat(steering, -1, 1);
 
-  float left = clampFloat(throttle + steering, -1, 1);
-  float right = clampFloat(throttle - steering, -1, 1);
+  // While reversing, swap the differential steering mix so a logical LEFT
+  // command still moves the vehicle toward its left side.
+  float steeringMix = throttle < -0.02f ? -steering : steering;
+  float left = clampFloat(throttle + steeringMix, -1, 1);
+  float right = clampFloat(throttle - steeringMix, -1, 1);
 
   digitalWrite(PIN_STBY, HIGH);
   setMotorRaw(PIN_AIN1, PIN_AIN2, PIN_PWMA, left);
@@ -321,11 +333,11 @@ int readWifiRssi() {
   return WiFi.isConnected() ? WiFi.RSSI() : -100;
 }
 
-void sendJsonDocument(JsonDocument &doc) {
-  if (!wsConnected) return;
+bool sendJsonDocument(JsonDocument &doc) {
+  if (!wsConnected) return false;
   String payload;
   serializeJson(doc, payload);
-  webSocket.sendTXT(payload);
+  return webSocket.sendTXT(payload);
 }
 
 void sendDeviceLog(const char *level, const String &message) {
@@ -539,7 +551,44 @@ void applyBehaviorProfile(JsonObject payload) {
   behaviorProfile.note = payloadString(profile, "note", behaviorProfile.note);
 }
 
-void changeWiFiFromPayload(JsonObject payload) {
+bool sendWifiUpdateAck() {
+  if (!wsConnected || cloudWifiCommandId.length() == 0) return false;
+
+  JsonDocument doc;
+  doc["type"] = "wifi_update_ack";
+  doc["vehicleId"] = config.vehicleId;
+  doc["commandId"] = cloudWifiCommandId;
+  doc["ssid"] = config.wifiSsid;
+  doc["saved"] = true;
+  doc["connected"] = true;
+  doc["timestamp"] = millis();
+  return sendJsonDocument(doc);
+}
+
+void clearCloudWifiTransition() {
+  cloudWifiUpdatePending = false;
+  cloudWifiAwaitingAck = false;
+  cloudWifiCommandId = "";
+  previousWifiSsid = "";
+  previousWifiPass = "";
+  cloudWifiRequiredWsGeneration = 0;
+  cloudWifiUpdateStartedAt = 0;
+}
+
+void rollbackCloudWifiTransition(const char *reason) {
+  if (!cloudWifiUpdatePending) return;
+
+  Serial.print("Rolling vehicle WiFi back: ");
+  Serial.println(reason);
+  strlcpy(config.wifiSsid, previousWifiSsid.c_str(), sizeof(config.wifiSsid));
+  strlcpy(config.wifiPass, previousWifiPass.c_str(), sizeof(config.wifiPass));
+  clearCloudWifiTransition();
+  wifiSwitchInProgress = false;
+  wifiSwitchPending = true;
+  wifiSwitchAt = millis() + 500;
+}
+
+void changeWiFiFromPayload(JsonObject payload, const char *commandId) {
   String ssid = payloadString(payload, "ssid", "");
   String password = payloadString(payload, "password", "");
   if (ssid.length() == 0) {
@@ -547,10 +596,16 @@ void changeWiFiFromPayload(JsonObject payload) {
     return;
   }
 
+  previousWifiSsid = config.wifiSsid;
+  previousWifiPass = config.wifiPass;
   strlcpy(config.wifiSsid, ssid.c_str(), sizeof(config.wifiSsid));
   strlcpy(config.wifiPass, password.c_str(), sizeof(config.wifiPass));
-  saveConfig();
-  sendStatus("WIFI_SET received: switching vehicle WiFi");
+  cloudWifiUpdatePending = true;
+  cloudWifiAwaitingAck = false;
+  cloudWifiCommandId = commandId ? commandId : "";
+  cloudWifiRequiredWsGeneration = wsConnectionGeneration + 1;
+  cloudWifiUpdateStartedAt = millis();
+  sendStatus("WIFI_SET received: testing vehicle WiFi before commit");
   stopDrive();
   wifiSwitchPending = true;
   wifiSwitchAt = millis() + 1200;
@@ -604,7 +659,17 @@ void handleAction(JsonDocument &doc) {
   } else if (strcmp(action, "WIFI_SCAN") == 0) {
     startWifiScan(commandId);
   } else if (strcmp(action, "WIFI_SET") == 0) {
-    changeWiFiFromPayload(payload);
+    changeWiFiFromPayload(payload, commandId);
+  } else if (strcmp(action, "WIFI_COMMIT") == 0) {
+    if (cloudWifiUpdatePending && cloudWifiCommandId == commandId) {
+      saveConfig();
+      clearCloudWifiTransition();
+      sendDeviceLog("info", "Vehicle committed shared WiFi transaction");
+    }
+  } else if (strcmp(action, "WIFI_ROLLBACK") == 0) {
+    if (cloudWifiUpdatePending && cloudWifiCommandId == commandId) {
+      rollbackCloudWifiTransition("relay requested rollback");
+    }
   } else if (strcmp(action, "WIFI_PORTAL_OPEN") == 0) {
     Serial.println("Opening WiFi setup portal after restart");
     prefs.begin("fpv-car", false);
@@ -628,6 +693,7 @@ void handleAction(JsonDocument &doc) {
 void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   if (type == WStype_CONNECTED) {
     wsConnected = true;
+    wsConnectionGeneration++;
     lastWsDisconnectedLogAt = 0;
     Serial.print("WebSocket connected: ");
     Serial.print(config.wsScheme);
@@ -1014,7 +1080,7 @@ void startSetupPortal() {
 
       if (!setupConnectOk) {
         Serial.println("Vehicle Wi-Fi failed. Keeping setup portal open for correction.");
-        setupLastError = "เชื่อมต่อ Wi-Fi ไม่สำเร็จ กรุณาตรวจชื่อเครือข่ายและรหัสผ่าน";
+        setupLastError = "เชื่อมต่อ Wi-Fi ไม่สำเร็จ ตรวจรหัสผ่าน ย่าน 2.4 GHz และจำนวนอุปกรณ์สูงสุดของ Hotspot (ต้องอย่างน้อย 2)";
         setupConnectDone = false;
         camProvisionAcked = false; // require a fresh camera ACK after another save
         WiFi.disconnect(false, false);
@@ -1184,10 +1250,29 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED) {
       wifiSwitchInProgress = false;
       Serial.println("ESP32 vehicle connected to the new WiFi.");
+      if (cloudWifiUpdatePending) {
+        cloudWifiAwaitingAck = true;
+        Serial.println("Waiting for cloud reconnect before vehicle WiFi ACK.");
+      }
     } else if (now - wifiSwitchStartedAt > WIFI_SWITCH_TIMEOUT_MS) {
-      Serial.println("New WiFi failed. Restarting into shared recovery setup...");
-      ESP.restart();
+      if (cloudWifiUpdatePending) {
+        rollbackCloudWifiTransition("target WiFi connection failed");
+      } else {
+        Serial.println("New WiFi failed. Restarting into shared recovery setup...");
+        ESP.restart();
+      }
     }
+  }
+  if (cloudWifiAwaitingAck &&
+      wsConnected &&
+      wsConnectionGeneration >= cloudWifiRequiredWsGeneration &&
+      sendWifiUpdateAck()) {
+    cloudWifiAwaitingAck = false;
+    Serial.println("Vehicle WiFi ACK sent after cloud reconnect.");
+  }
+  if (cloudWifiUpdatePending &&
+      now - cloudWifiUpdateStartedAt > CLOUD_WIFI_TRANSACTION_TIMEOUT_MS) {
+    rollbackCloudWifiTransition("transaction timed out before commit");
   }
   if (buzzerOffAt > 0 && now >= buzzerOffAt) {
     digitalWrite(PIN_BUZZER, LOW);

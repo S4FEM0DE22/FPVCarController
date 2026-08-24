@@ -35,15 +35,17 @@ On most phones and tablets, the setup page now opens automatically as a captive 
 5. Choose your Wi-Fi/hotspot, enter the password once, and fill in the controller/cloud settings.
 6. Press `Save and connect both boards`.
 
+The selected hotspot must use 2.4 GHz and allow at least two connected devices. A one-device hotspot limit makes the vehicle and camera alternate connections and cannot be corrected in firmware.
+
 After saving:
 
-- The ESP32 vehicle saves the Wi-Fi and keeps `FPV-Car-Setup` active.
-- The ESP32-CAM fetches the same Wi-Fi/controller/cloud settings and saves them to Preferences.
-- The ESP32-CAM acknowledges that the settings were saved, then both boards connect to the new Wi-Fi.
+- ESP32-CAM fetches the complete configuration from `FPV-Car-Setup`.
+- The camera temporarily joins the target Wi-Fi to verify the credentials, returns to the setup AP, and sends a verified ACK.
+- Only after that ACK does the main ESP32 join the target Wi-Fi; the camera then follows with the same saved configuration.
 - The progress page shows whether the camera has received the settings and whether the vehicle connected successfully.
 - If the password is incorrect, the setup network remains available so the value can be corrected.
 
-On later boots, the vehicle briefly exposes a hidden `FPV-Car-Sync` channel so the camera can verify that both saved configurations match. When they match, the camera acknowledges immediately and both boards continue to the saved Wi-Fi. The visible `FPV-Car-Setup` network appears only when setup or recovery is required.
+On later boots, the hidden `FPV-Car-Sync` channel lets the camera verify that both saved configurations match before both boards connect.
 
 ## ESP32 Vehicle Setup
 
@@ -67,7 +69,7 @@ Default TB6612FNG pins are declared at the top of the sketch. Change them to mat
 1. Open `esp32-cam/esp32-cam.ino`.
 2. Select `AI Thinker ESP32-CAM`, then flash it.
 3. Power it on together with the ESP32 vehicle during first-time setup.
-4. The ESP32-CAM does not open its own setup portal. It waits for the ESP32 vehicle setup AP, fetches the provision data, saves it, and joins the same Wi-Fi.
+4. The ESP32-CAM does not open its own setup portal. It receives the vehicle configuration through the temporary setup network, verifies the target Wi-Fi, and joins the same network as the vehicle.
 5. After saving Wi-Fi, open the camera IP. It redirects to:
 
 ```text
@@ -91,8 +93,11 @@ Deploy the updated relay and web app before flashing this ESP32-CAM firmware. Th
 The controller page can change Wi-Fi for both boards from one form:
 
 - The web app sends `WIFI_SCAN` through the cloud relay. The ESP32 scans nearby 2.4 GHz networks and returns SSID, signal strength, channel, and security status for the selection list.
-- The relay sends `WIFI_SET` to ESP32-CAM first. ESP32-CAM saves the credentials and returns `wifi_update_ack`; only then does the relay forward the same update to the main ESP32.
-- If ESP32-CAM does not confirm the update within the configured timeout, the main ESP32 stays on the current network and the controller receives an error instead of a false success message.
+- The relay sends `WIFI_SET` to ESP32-CAM first while the main ESP32 remains on the current network.
+- ESP32-CAM tests the target Wi-Fi and must reconnect to the cloud through that network before sending `wifi_update_ack`.
+- Only after the verified camera ACK does the relay send the same update to the main ESP32 and wait for its cloud reconnect.
+- When both boards report the target SSID, the relay sends `WIFI_COMMIT` to both; neither board permanently saves the new credentials before this commit.
+- If either board fails or the transaction times out, `WIFI_ROLLBACK` returns both boards to their previous saved network.
 - Both boards save the new Wi-Fi to Preferences, send their final status, then reconnect after a short delay.
 - The controller does not need direct access to the camera IP, so the change also works when the browser and car use different networks.
 - Settings compares the SSID and gateway reported by both boards and shows whether they are on the same Wi-Fi.

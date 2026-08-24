@@ -174,11 +174,11 @@ export default function SettingsPanel({
     try {
       await onChangeWifi(nextSsid, password);
       setMessage(
-        "ส่งคำสั่งแล้ว ระบบจะให้ ESP32-CAM บันทึกค่าก่อน แล้วจึงย้าย ESP32 หลักไป Wi-Fi ใหม่"
+        "กล้องยืนยันการเชื่อม Wi-Fi ใหม่แล้ว ระบบกำลังย้าย ESP32 หลักไปเครือข่ายเดียวกัน"
       );
       setPassword("");
     } catch {
-      setMessage("ส่งค่า Wi-Fi ไม่สำเร็จ กรุณาตรวจว่าทั้งรถและกล้องออนไลน์");
+      setMessage("ส่งค่า Wi-Fi ไม่สำเร็จ กล้องอาจเชื่อมเครือข่ายใหม่หรือกลับเข้า Cloud ไม่ได้");
     } finally {
       setSubmitting(false);
     }
@@ -407,7 +407,7 @@ export default function SettingsPanel({
                   <h3 className="text-sm font-semibold text-neutral-800">เปลี่ยน Wi-Fi ของรถและกล้อง</h3>
                 </div>
                 <p className="mb-3 text-xs leading-5 text-slate-500">
-                  ESP32 จะสแกนเครือข่ายใกล้รถ แล้วส่งค่าที่เลือกให้ ESP32-CAM ผ่าน Cloud โดยอัตโนมัติ
+                  ระบบจะให้ ESP32-CAM ทดสอบเครือข่ายใหม่ผ่าน Cloud ก่อน แล้วจึงย้าย ESP32 หลักตาม
                 </p>
 
                 <div className="space-y-3">
@@ -555,7 +555,7 @@ export default function SettingsPanel({
                   ) : null}
 
                   <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-950">
-                    ต้องให้ทั้ง ESP32 และ ESP32-CAM ออนไลน์ก่อน ทั้งสองบอร์ดจะหยุดเชื่อมต่อชั่วคราวประมาณ 5-20 วินาที
+                    ต้องให้ทั้งสองบอร์ดออนไลน์ และตั้ง Hotspot ให้รับได้อย่างน้อย 2 อุปกรณ์
                   </div>
 
                   <button

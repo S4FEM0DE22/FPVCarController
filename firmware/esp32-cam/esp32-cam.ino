@@ -57,13 +57,26 @@ bool cameraReady = false;
 bool cameraHasPsram = false;
 bool flashOn = false;
 bool wsConnected = false;
+uint32_t wsConnectionGeneration = 0;
 bool cloudMotionMode = false;
 bool wifiSwitchPending = false;
 unsigned long wifiSwitchAt = 0;
 bool wifiSwitchInProgress = false;
 unsigned long wifiSwitchStartedAt = 0;
 const unsigned long WIFI_SWITCH_TIMEOUT_MS = 25000;
+const unsigned long WIFI_RECONNECT_INTERVAL_MS = 5000;
 const unsigned long BOOT_SYNC_DISCOVERY_MS = 10000;
+unsigned long wifiDisconnectedAt = 0;
+unsigned long lastWifiReconnectAttemptAt = 0;
+bool cloudWifiUpdatePending = false;
+bool cloudWifiAwaitingAck = false;
+bool cloudWifiAckSent = false;
+String cloudWifiCommandId = "";
+String previousWifiSsid = "";
+String previousWifiPass = "";
+uint32_t cloudWifiRequiredWsGeneration = 0;
+unsigned long cloudWifiUpdateStartedAt = 0;
+const unsigned long CLOUD_WIFI_TRANSACTION_TIMEOUT_MS = 70000;
 unsigned long lastFrameAt = 0;
 unsigned long cloudMotionUntil = 0;
 unsigned long lastStatusAt = 0;
@@ -493,20 +506,45 @@ void sendDeviceLog(const char *level, const String &message) {
   webSocket.sendTXT(payload);
 }
 
-bool sendWifiUpdateAck(const char *commandId, const char *ssid) {
-  if (!wsConnected || !commandId || strlen(commandId) == 0) return false;
+bool sendWifiUpdateAck() {
+  if (!wsConnected || cloudWifiCommandId.length() == 0) return false;
 
   JsonDocument doc;
   doc["type"] = "wifi_update_ack";
   doc["vehicleId"] = config.vehicleId;
-  doc["commandId"] = commandId;
-  doc["ssid"] = ssid;
+  doc["commandId"] = cloudWifiCommandId;
+  doc["ssid"] = config.wifiSsid;
   doc["saved"] = true;
+  doc["connected"] = true;
   doc["timestamp"] = millis();
 
   String payload;
   serializeJson(doc, payload);
   return webSocket.sendTXT(payload);
+}
+
+void clearCloudWifiTransition() {
+  cloudWifiUpdatePending = false;
+  cloudWifiAwaitingAck = false;
+  cloudWifiAckSent = false;
+  cloudWifiCommandId = "";
+  previousWifiSsid = "";
+  previousWifiPass = "";
+  cloudWifiRequiredWsGeneration = 0;
+  cloudWifiUpdateStartedAt = 0;
+}
+
+void rollbackCloudWifiTransition(const char *reason) {
+  if (!cloudWifiUpdatePending) return;
+
+  Serial.print("Rolling camera WiFi back: ");
+  Serial.println(reason);
+  strlcpy(config.wifiSsid, previousWifiSsid.c_str(), sizeof(config.wifiSsid));
+  strlcpy(config.wifiPass, previousWifiPass.c_str(), sizeof(config.wifiPass));
+  clearCloudWifiTransition();
+  wifiSwitchInProgress = false;
+  wifiSwitchPending = true;
+  wifiSwitchAt = millis() + 500;
 }
 
 void sendCameraStreamStatus(float fps) {
@@ -679,6 +717,7 @@ void sendCloudFrame() {
 void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   if (type == WStype_CONNECTED) {
     wsConnected = true;
+    wsConnectionGeneration++;
     cloudFrameSequence = 0;
     clearPendingCloudFrameAcks();
     Serial.print("Camera WebSocket connected: ");
@@ -751,21 +790,36 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
         const char *ssid = actionPayload["ssid"] | "";
         const char *password = actionPayload["password"] | "";
         const char *commandId = doc["commandId"] | "";
-        if (strlen(ssid) == 0) {
-          sendDeviceLog("warn", "Camera rejected WiFi update with empty SSID");
+        if (strlen(ssid) == 0 || strlen(commandId) == 0) {
+          sendDeviceLog("warn", "Camera rejected invalid cloud WiFi update");
           return;
         }
 
+        previousWifiSsid = config.wifiSsid;
+        previousWifiPass = config.wifiPass;
         strlcpy(config.wifiSsid, ssid, sizeof(config.wifiSsid));
         strlcpy(config.wifiPass, password, sizeof(config.wifiPass));
-        saveConfig();
-        if (!sendWifiUpdateAck(commandId, config.wifiSsid)) {
-          sendDeviceLog("warn", "Camera saved WiFi but could not confirm it to the relay");
-          return;
-        }
-        sendDeviceLog("info", "Camera WiFi update saved; reconnecting");
+        cloudWifiCommandId = commandId;
+        cloudWifiUpdatePending = true;
+        cloudWifiAwaitingAck = false;
+        cloudWifiAckSent = false;
+        cloudWifiRequiredWsGeneration = wsConnectionGeneration + 1;
+        cloudWifiUpdateStartedAt = millis();
+        sendDeviceLog("info", "Camera testing the new WiFi before vehicle handoff");
         wifiSwitchPending = true;
-        wifiSwitchAt = millis() + 2500;
+        wifiSwitchAt = millis() + 700;
+      } else if (strcmp(action, "WIFI_COMMIT") == 0) {
+        const char *commandId = doc["commandId"] | "";
+        if (cloudWifiUpdatePending && cloudWifiCommandId == commandId) {
+          saveConfig();
+          clearCloudWifiTransition();
+          sendDeviceLog("info", "Camera committed shared WiFi transaction");
+        }
+      } else if (strcmp(action, "WIFI_ROLLBACK") == 0) {
+        const char *commandId = doc["commandId"] | "";
+        if (cloudWifiUpdatePending && cloudWifiCommandId == commandId) {
+          rollbackCloudWifiTransition("relay requested rollback");
+        }
       }
     }
     return;
@@ -838,15 +892,30 @@ void setupRoutes() {
   Serial.println("Camera HTTP server started on port 80");
 }
 
+void stopStaConnectionAttempt() {
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect(true, false);
+  delay(250);
+}
+
+void beginStaConnection(const char *ssid, const char *password, bool autoReconnect) {
+  stopStaConnectionAttempt();
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(autoReconnect);
+  delay(100);
+  WiFi.begin(ssid, password);
+}
+
 bool connectToConfiguredWiFi(unsigned long timeoutMs) {
   if (strlen(config.wifiSsid) == 0) return false;
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin(config.wifiSsid, config.wifiPass);
+  beginStaConnection(config.wifiSsid, config.wifiPass, true);
 
   Serial.print("Connecting WiFi: ");
   Serial.println(config.wifiSsid);
+  Serial.print("Saved password length: ");
+  Serial.println(strlen(config.wifiPass));
 
   unsigned long startedAt = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startedAt < timeoutMs) {
@@ -857,6 +926,7 @@ bool connectToConfiguredWiFi(unsigned long timeoutMs) {
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi connect failed.");
+    stopStaConnectionAttempt();
     return false;
   }
 
@@ -865,6 +935,44 @@ bool connectToConfiguredWiFi(unsigned long timeoutMs) {
   Serial.print(" IP=");
   Serial.println(WiFi.localIP());
   return true;
+}
+
+void maintainWiFiConnection(unsigned long now) {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (wifiDisconnectedAt != 0) {
+      Serial.print("ESP32-CAM WiFi restored: ");
+      Serial.print(WiFi.SSID());
+      Serial.print(" IP=");
+      Serial.println(WiFi.localIP());
+    }
+    wifiDisconnectedAt = 0;
+    lastWifiReconnectAttemptAt = 0;
+    return;
+  }
+
+  if (wifiSwitchPending || wifiSwitchInProgress || strlen(config.wifiSsid) == 0) {
+    return;
+  }
+
+  if (wifiDisconnectedAt == 0) {
+    wifiDisconnectedAt = now;
+    Serial.printf("ESP32-CAM WiFi lost (status=%d). Starting recovery...\n", WiFi.status());
+  }
+
+  if (lastWifiReconnectAttemptAt != 0 &&
+      now - lastWifiReconnectAttemptAt < WIFI_RECONNECT_INTERVAL_MS) {
+    return;
+  }
+
+  lastWifiReconnectAttemptAt = now;
+  Serial.print("Retrying saved WiFi: ");
+  Serial.println(config.wifiSsid);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
+  if (!WiFi.reconnect()) {
+    WiFi.begin(config.wifiSsid, config.wifiPass);
+  }
 }
 
 bool applyProvisionPayload(const String &body) {
@@ -892,7 +1000,10 @@ bool applyProvisionPayload(const String &body) {
   strlcpy(config.controlUrl, doc["controlUrl"] | config.controlUrl, sizeof(config.controlUrl));
   saveConfig();
 
-  Serial.println("Provision saved from ESP32 vehicle.");
+  Serial.print("Provision saved from ESP32 vehicle: SSID=");
+  Serial.print(config.wifiSsid);
+  Serial.print(" passwordLength=");
+  Serial.println(strlen(config.wifiPass));
   return true;
 }
 
@@ -979,10 +1090,7 @@ bool checkVehicleWiFiMatch() {
 
 bool runBootWiFiSync() {
   Serial.println("Joining hidden vehicle boot sync AP...");
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect(false, false);
-  delay(200);
-  WiFi.begin(SYNC_AP_SSID, DEVICE_AP_PASSWORD);
+  beginStaConnection(SYNC_AP_SSID, DEVICE_AP_PASSWORD, false);
   unsigned long startedAt = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startedAt < BOOT_SYNC_DISCOVERY_MS) {
     delay(250);
@@ -990,6 +1098,7 @@ bool runBootWiFiSync() {
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("Hidden vehicle boot sync AP was not available.");
+    stopStaConnectionAttempt();
     return false;
   }
 
@@ -1019,9 +1128,7 @@ bool sendProvisionAckToVehicle(const char *message = "credentials_saved") {
 
 bool waitForVehicleProvision() {
   Serial.println("Connecting to setup AP: FPV-Car-Setup");
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin(SETUP_AP_SSID, DEVICE_AP_PASSWORD);
+  beginStaConnection(SETUP_AP_SSID, DEVICE_AP_PASSWORD, false);
 
   unsigned long apStartedAt = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - apStartedAt < 30000) {
@@ -1032,6 +1139,7 @@ bool waitForVehicleProvision() {
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("Could not join FPV-Car-Setup.");
+    stopStaConnectionAttempt();
     return false;
   }
 
@@ -1039,10 +1147,34 @@ bool waitForVehicleProvision() {
   unsigned long provisionStartedAt = millis();
   while (millis() - provisionStartedAt < 240000) {
     if (fetchProvisionFromVehicle()) {
-      // New credentials are saved locally. ACK the vehicle before leaving setup AP.
+      Serial.println("Testing provisioned WiFi before acknowledging the vehicle...");
+      if (!connectToConfiguredWiFi(15000)) {
+        Serial.println("Provisioned WiFi test failed. Returning to FPV-Car-Setup.");
+        beginStaConnection(SETUP_AP_SSID, DEVICE_AP_PASSWORD, false);
+        unsigned long retryStartedAt = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - retryStartedAt < 10000) {
+          delay(100);
+        }
+        continue;
+      }
+
+      Serial.println("Provisioned WiFi verified. Returning to setup AP for ACK...");
+      beginStaConnection(SETUP_AP_SSID, DEVICE_AP_PASSWORD, false);
+      unsigned long setupReturnStartedAt = millis();
+      while (
+        WiFi.status() != WL_CONNECTED &&
+        millis() - setupReturnStartedAt < 10000
+      ) {
+        delay(100);
+      }
+      if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("Could not return to FPV-Car-Setup for verification ACK.");
+        return false;
+      }
+
       bool acked = sendProvisionAckToVehicle("initial_wifi_saved");
       if (!acked) {
-        Serial.println("Initial provision saved, but ACK failed. Retrying while still on setup AP.");
+        Serial.println("WiFi verified, but setup ACK failed. Retrying...");
         for (int i = 0; i < 5 && !acked; ++i) {
           delay(500);
           acked = sendProvisionAckToVehicle("initial_wifi_saved");
@@ -1089,6 +1221,9 @@ void setup() {
   pinMode(FLASH_LED_PIN, OUTPUT);
   digitalWrite(FLASH_LED_PIN, LOW);
   loadConfig();
+  WiFi.mode(WIFI_STA);
+  Serial.print("ESP32-CAM WiFi MAC: ");
+  Serial.println(WiFi.macAddress());
   if (!isValidCloudStreamProfile(config.streamProfile)) {
     strlcpy(config.streamProfile, "balanced", sizeof(config.streamProfile));
   }
@@ -1112,9 +1247,12 @@ void loop() {
     WiFi.disconnect(true, true);
     delay(300);
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    WiFi.setAutoReconnect(true);
     WiFi.begin(config.wifiSsid, config.wifiPass);
   }
 
+  maintainWiFiConnection(millis());
   sendCloudFrame();
 
   unsigned long now = millis();
@@ -1122,10 +1260,30 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED) {
       wifiSwitchInProgress = false;
       Serial.println("ESP32-CAM connected to the new WiFi.");
+      if (cloudWifiUpdatePending) {
+        cloudWifiAwaitingAck = true;
+        Serial.println("Waiting for cloud reconnect before WiFi handoff ACK.");
+      }
     } else if (now - wifiSwitchStartedAt > WIFI_SWITCH_TIMEOUT_MS) {
-      Serial.println("New WiFi failed. Restarting camera recovery flow...");
-      ESP.restart();
+      if (cloudWifiUpdatePending) {
+        rollbackCloudWifiTransition("target WiFi connection failed");
+      } else {
+        Serial.println("New WiFi failed. Restarting camera recovery flow...");
+        ESP.restart();
+      }
     }
+  }
+  if (cloudWifiAwaitingAck &&
+      wsConnected &&
+      wsConnectionGeneration >= cloudWifiRequiredWsGeneration &&
+      sendWifiUpdateAck()) {
+    cloudWifiAwaitingAck = false;
+    cloudWifiAckSent = true;
+    Serial.println("Camera WiFi handoff ACK sent after cloud reconnect.");
+  }
+  if (cloudWifiUpdatePending &&
+      now - cloudWifiUpdateStartedAt > CLOUD_WIFI_TRANSACTION_TIMEOUT_MS) {
+    rollbackCloudWifiTransition("transaction timed out before commit");
   }
   if (cloudMotionMode && (long)(now - cloudMotionUntil) >= 0) {
     setCloudMotionMode(false);
@@ -1158,7 +1316,12 @@ void loop() {
       );
       sendCameraStreamStatus(cloudFps);
     } else {
-      Serial.println("Camera cloud stream disconnected");
+      Serial.printf(
+        "Camera cloud disconnected | WiFi=%s status=%d RSSI=%d dBm\n",
+        WiFi.status() == WL_CONNECTED ? "connected" : "disconnected",
+        WiFi.status(),
+        WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : -100
+      );
     }
   }
 }
