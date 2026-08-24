@@ -51,6 +51,9 @@ const CAMERA_CONTROLLER_MAX_BUFFERED_BYTES = Number(
 const CAMERA_RENDER_ACK_TIMEOUT_MS = Number(
   process.env.CAMERA_RENDER_ACK_TIMEOUT_MS || 900
 );
+const WIFI_UPDATE_ACK_TIMEOUT_MS = Number(
+  process.env.WIFI_UPDATE_ACK_TIMEOUT_MS || 3500
+);
 const CAMERA_LIVENESS_TIMEOUT_MS = Number(
   process.env.CAMERA_LIVENESS_TIMEOUT_MS || 10000
 );
@@ -278,6 +281,7 @@ function getVehicleEntry(vehicleId) {
       lastCameraFrameId: 0,
       lastCameraFrameAt: 0,
       pendingCameraFrameAcks: new Map(),
+      pendingWifiChange: null,
       lastCameraStreamStatus: null,
       lastDeviceLogs: [],
     });
@@ -370,6 +374,18 @@ function clearPendingCameraFrameAcks(entry) {
   }
 }
 
+function failPendingWifiChange(entry, message) {
+  const pending = entry?.pendingWifiChange;
+  if (!pending) return;
+  clearTimeout(pending.timeoutId);
+  entry.pendingWifiChange = null;
+  safeSend(pending.controller, {
+    type: "error",
+    commandId: pending.commandId,
+    message,
+  });
+}
+
 function createLegacyCommandId(prefix) {
   return `${prefix}-legacy-${Date.now().toString(36)}-${Math.random()
     .toString(36)
@@ -396,6 +412,7 @@ function removeSocketFromRegistry(ws) {
       });
       entry.lastTelemetry = null;
       entry.lastStatus = null;
+      failPendingWifiChange(entry, "ESP32 disconnected during WiFi update");
     }
   }
 
@@ -408,6 +425,10 @@ function removeSocketFromRegistry(ws) {
       entry.lastCameraFrameAt = 0;
       entry.lastCameraStreamStatus = null;
       clearPendingCameraFrameAcks(entry);
+      failPendingWifiChange(
+        entry,
+        "ESP32-CAM disconnected before confirming the WiFi update"
+      );
 
       broadcastToControllers(meta.vehicleId, {
         type: "camera_status",
@@ -514,6 +535,7 @@ logger.info({
   cameraFrameMaxBytes: CAMERA_FRAME_MAX_BYTES,
   cameraControllerMaxBufferedBytes: CAMERA_CONTROLLER_MAX_BUFFERED_BYTES,
   cameraRenderAckTimeoutMs: CAMERA_RENDER_ACK_TIMEOUT_MS,
+  wifiUpdateAckTimeoutMs: WIFI_UPDATE_ACK_TIMEOUT_MS,
   cameraLivenessTimeoutMs: CAMERA_LIVENESS_TIMEOUT_MS,
   vehicleLivenessTimeoutMs: VEHICLE_LIVENESS_TIMEOUT_MS,
   cameraLivenessCheckIntervalMs: CAMERA_LIVENESS_CHECK_INTERVAL_MS,
@@ -909,6 +931,50 @@ wss.on("connection", (ws, request) => {
       return;
     }
 
+    if (data.type === "wifi_update_ack") {
+      if (clientType !== "esp-cam") return;
+
+      const pending = entry.pendingWifiChange;
+      const commandId =
+        typeof data.commandId === "string" ? data.commandId.trim() : "";
+      if (!pending || !commandId || pending.commandId !== commandId) return;
+
+      if (data.saved !== true || data.ssid !== pending.ssid) {
+        failPendingWifiChange(
+          entry,
+          "ESP32-CAM could not confirm the new WiFi settings"
+        );
+        return;
+      }
+
+      clearTimeout(pending.timeoutId);
+      entry.pendingWifiChange = null;
+
+      if (!entry.esp || !safeSend(entry.esp, pending.forwarded)) {
+        safeSend(pending.controller, {
+          type: "error",
+          commandId,
+          message: "ESP32 disconnected before the WiFi update was applied",
+        });
+        return;
+      }
+
+      safeSend(pending.controller, {
+        type: "ack",
+        commandId,
+        message: `ESP32-CAM saved ${pending.ssid}; vehicle WiFi update forwarded`,
+      });
+      logger.info({
+        event: "wifi_update.camera_confirmed",
+        ip,
+        connectionId,
+        vehicleId,
+        commandId,
+        ssid: pending.ssid,
+      });
+      return;
+    }
+
     // 3) CONTROL จากเว็บ -> ส่งให้ ESP
     if (data.type === "control") {
       const commandId =
@@ -1088,8 +1154,72 @@ wss.on("connection", (ws, request) => {
         commandId,
       };
 
-      if (data.action === "WIFI_SET" && entry.camera) {
-        safeSend(entry.camera, forwarded);
+      if (data.action === "WIFI_SET") {
+        const ssid =
+          typeof data.payload?.ssid === "string"
+            ? data.payload.ssid.trim().slice(0, 64)
+            : "";
+        const password =
+          typeof data.payload?.password === "string"
+            ? data.payload.password.slice(0, 96)
+            : "";
+
+        if (!ssid) {
+          safeSend(ws, {
+            type: "error",
+            commandId,
+            message: "WiFi update requires an SSID",
+          });
+          return;
+        }
+        if (!entry.camera) {
+          safeSend(ws, {
+            type: "error",
+            commandId,
+            message: "ESP32-CAM not connected",
+          });
+          return;
+        }
+
+        failPendingWifiChange(entry, "WiFi update replaced by a newer request");
+        const wifiForwarded = {
+          ...forwarded,
+          payload: { ssid, password },
+        };
+        if (!safeSend(entry.camera, wifiForwarded)) {
+          safeSend(ws, {
+            type: "error",
+            commandId,
+            message: "Could not deliver WiFi settings to ESP32-CAM",
+          });
+          return;
+        }
+
+        const timeoutId = setTimeout(() => {
+          if (entry.pendingWifiChange?.commandId !== commandId) return;
+          failPendingWifiChange(
+            entry,
+            "ESP32-CAM did not confirm the WiFi update"
+          );
+        }, WIFI_UPDATE_ACK_TIMEOUT_MS);
+        timeoutId.unref?.();
+        entry.pendingWifiChange = {
+          commandId,
+          controller: ws,
+          forwarded: wifiForwarded,
+          ssid,
+          timeoutId,
+        };
+
+        logger.info({
+          event: "wifi_update.awaiting_camera",
+          ip,
+          connectionId,
+          vehicleId,
+          commandId,
+          ssid,
+        });
+        return;
       }
 
       if (CAMERA_MOTION_ACTIONS.has(data.action)) {

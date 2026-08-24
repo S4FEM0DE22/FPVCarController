@@ -173,7 +173,9 @@ export default function SettingsPanel({
 
     try {
       await onChangeWifi(nextSsid, password);
-      setMessage("ส่งค่า Wi-Fi ให้ ESP32 และ ESP32-CAM แล้ว กำลังรอเชื่อมต่อใหม่");
+      setMessage(
+        "ส่งคำสั่งแล้ว ระบบจะให้ ESP32-CAM บันทึกค่าก่อน แล้วจึงย้าย ESP32 หลักไป Wi-Fi ใหม่"
+      );
       setPassword("");
     } catch {
       setMessage("ส่งค่า Wi-Fi ไม่สำเร็จ กรุณาตรวจว่าทั้งรถและกล้องออนไลน์");

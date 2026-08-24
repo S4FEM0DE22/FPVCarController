@@ -50,6 +50,7 @@ function startServer() {
       CAMERA_LIVENESS_TIMEOUT_MS: "1500",
       VEHICLE_LIVENESS_TIMEOUT_MS: "1500",
       CAMERA_LIVENESS_CHECK_INTERVAL_MS: "100",
+      WIFI_UPDATE_ACK_TIMEOUT_MS: "300",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -560,7 +561,7 @@ test("camera stream profile reaches esp-cam without the vehicle ESP", async () =
   }
 });
 
-test("wifi update is forwarded to both vehicle and camera", async () => {
+test("wifi update reaches the vehicle only after the camera confirms it was saved", async () => {
   const vehicleId = `test-shared-wifi-${Date.now()}`;
   const url = `ws://127.0.0.1:${serverPort}`;
   const esp = await connectClient(url);
@@ -599,14 +600,36 @@ test("wifi update is forwarded to both vehicle and camera", async () => {
       commandId,
     });
 
+    const cameraMessage = await cameraUpdate;
+    assert.deepEqual(cameraMessage.payload, {
+      ssid: "New Network",
+      password: "new-password",
+    });
+
+    let vehicleReceived = false;
+    vehicleUpdate.then(() => {
+      vehicleReceived = true;
+    });
+    await delay(50);
+    assert.equal(vehicleReceived, false);
+
+    const controllerAck = waitForMessage(
+      controller,
+      (msg) => msg.type === "ack" && msg.commandId === commandId
+    );
+    sendJson(camera, {
+      type: "wifi_update_ack",
+      vehicleId,
+      commandId,
+      ssid: "New Network",
+      saved: true,
+    });
+
     assert.deepEqual((await vehicleUpdate).payload, {
       ssid: "New Network",
       password: "new-password",
     });
-    assert.deepEqual((await cameraUpdate).payload, {
-      ssid: "New Network",
-      password: "new-password",
-    });
+    assert.match((await controllerAck).message, /cam.*saved/i);
   } finally {
     esp.close();
     camera.close();

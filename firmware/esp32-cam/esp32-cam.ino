@@ -493,6 +493,22 @@ void sendDeviceLog(const char *level, const String &message) {
   webSocket.sendTXT(payload);
 }
 
+bool sendWifiUpdateAck(const char *commandId, const char *ssid) {
+  if (!wsConnected || !commandId || strlen(commandId) == 0) return false;
+
+  JsonDocument doc;
+  doc["type"] = "wifi_update_ack";
+  doc["vehicleId"] = config.vehicleId;
+  doc["commandId"] = commandId;
+  doc["ssid"] = ssid;
+  doc["saved"] = true;
+  doc["timestamp"] = millis();
+
+  String payload;
+  serializeJson(doc, payload);
+  return webSocket.sendTXT(payload);
+}
+
 void sendCameraStreamStatus(float fps) {
   if (!wsConnected) return;
 
@@ -734,6 +750,7 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
         JsonObject actionPayload = doc["payload"].as<JsonObject>();
         const char *ssid = actionPayload["ssid"] | "";
         const char *password = actionPayload["password"] | "";
+        const char *commandId = doc["commandId"] | "";
         if (strlen(ssid) == 0) {
           sendDeviceLog("warn", "Camera rejected WiFi update with empty SSID");
           return;
@@ -742,9 +759,13 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
         strlcpy(config.wifiSsid, ssid, sizeof(config.wifiSsid));
         strlcpy(config.wifiPass, password, sizeof(config.wifiPass));
         saveConfig();
+        if (!sendWifiUpdateAck(commandId, config.wifiSsid)) {
+          sendDeviceLog("warn", "Camera saved WiFi but could not confirm it to the relay");
+          return;
+        }
         sendDeviceLog("info", "Camera WiFi update saved; reconnecting");
         wifiSwitchPending = true;
-        wifiSwitchAt = millis() + 1200;
+        wifiSwitchAt = millis() + 2500;
       }
     }
     return;

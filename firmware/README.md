@@ -91,7 +91,8 @@ Deploy the updated relay and web app before flashing this ESP32-CAM firmware. Th
 The controller page can change Wi-Fi for both boards from one form:
 
 - The web app sends `WIFI_SCAN` through the cloud relay. The ESP32 scans nearby 2.4 GHz networks and returns SSID, signal strength, channel, and security status for the selection list.
-- The relay forwards one `WIFI_SET` action to both the ESP32 vehicle and ESP32-CAM over their existing secure WebSocket connections.
+- The relay sends `WIFI_SET` to ESP32-CAM first. ESP32-CAM saves the credentials and returns `wifi_update_ack`; only then does the relay forward the same update to the main ESP32.
+- If ESP32-CAM does not confirm the update within the configured timeout, the main ESP32 stays on the current network and the controller receives an error instead of a false success message.
 - Both boards save the new Wi-Fi to Preferences, send their final status, then reconnect after a short delay.
 - The controller does not need direct access to the camera IP, so the change also works when the browser and car use different networks.
 - Settings compares the SSID and gateway reported by both boards and shows whether they are on the same Wi-Fi.
