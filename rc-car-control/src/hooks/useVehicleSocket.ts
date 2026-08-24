@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { NETWORK_CONFIG } from "@/constants/network";
+import { NETWORK_CONFIG, VEHICLE_ID } from "@/constants/network";
 import { createLogger } from "@/lib/logger";
 import { buildIdentifyMessage, buildPingMessage } from "@/lib/protocol";
 import type { IncomingMessage, OutgoingMessage } from "@/types/socket";
@@ -35,6 +35,7 @@ export default function useVehicleSocket(
   const outboundQueueRef = useRef<OutgoingMessage[]>([]);
   const pendingAckRef = useRef<Map<string, PendingAckEntry>>(new Map());
   const lastPongAtRef = useRef<number | null>(null);
+  const pendingCameraFrameIdRef = useRef<number | null>(null);
 
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("DISCONNECTED");
@@ -310,6 +311,7 @@ export default function useVehicleSocket(
       wsRef.current = ws;
 
       ws.onopen = () => {
+        pendingCameraFrameIdRef.current = null;
         reconnectAttemptRef.current = 0;
         setReconnectAttempts(0);
         setConnectionState("CONNECTED");
@@ -325,12 +327,37 @@ export default function useVehicleSocket(
 
       ws.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
-          onCameraFrameRef.current?.(event.data);
+          const frameId = pendingCameraFrameIdRef.current;
+          pendingCameraFrameIdRef.current = null;
+          let acknowledged = false;
+          const acknowledge = (displayed: boolean) => {
+            if (acknowledged || frameId === null) return;
+            acknowledged = true;
+            if (ws.readyState !== WebSocket.OPEN) return;
+            ws.send(JSON.stringify({
+              type: "camera_frame_rendered",
+              vehicleId: VEHICLE_ID,
+              frameId,
+              displayed,
+              timestamp: Date.now(),
+            }));
+          };
+
+          if (onCameraFrameRef.current) {
+            onCameraFrameRef.current(event.data, { frameId, acknowledge });
+          } else {
+            acknowledge(false);
+          }
           return;
         }
 
         try {
           const data = JSON.parse(event.data) as IncomingMessage;
+
+          if (data.type === "camera_frame_meta") {
+            pendingCameraFrameIdRef.current = data.frameId;
+            return;
+          }
 
           if (data.type === "pong") {
             const now = Date.now();
@@ -360,6 +387,7 @@ export default function useVehicleSocket(
       };
 
       ws.onclose = (event) => {
+        pendingCameraFrameIdRef.current = null;
         setConnectionState("DISCONNECTED");
         clearTimers();
         setLastPongAgeMs(null);

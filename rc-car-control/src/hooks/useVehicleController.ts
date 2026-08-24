@@ -31,6 +31,11 @@ export interface DeviceLogEntry {
   message: string;
 }
 
+interface PendingCameraFrame {
+  frame: ArrayBuffer;
+  acknowledge: (displayed: boolean) => void;
+}
+
 const CAMERA_PAN_CENTER = 95;
 const CAMERA_TILT_CENTER = 64;
 const MAX_DEVICE_LOGS = 120;
@@ -112,7 +117,7 @@ export default function useVehicleController() {
   const wifiScanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const pendingCameraUntilRef = useRef(0);
   const cameraFrameUrlRef = useRef("");
-  const pendingCameraFrameRef = useRef<ArrayBuffer | null>(null);
+  const pendingCameraFrameRef = useRef<PendingCameraFrame | null>(null);
   const cameraFrameDecodingRef = useRef(false);
   const cameraDecoderRef = useRef<HTMLImageElement | null>(null);
   const cameraDecoderUrlRef = useRef("");
@@ -132,13 +137,15 @@ export default function useVehicleController() {
   const decodeLatestCameraFrame = useCallback(function decodeLatestFrame() {
     if (cameraFrameDecodingRef.current || cameraFrameDisposedRef.current) return;
 
-    const frame = pendingCameraFrameRef.current;
-    if (!frame) return;
+    const pendingFrame = pendingCameraFrameRef.current;
+    if (!pendingFrame) return;
 
     pendingCameraFrameRef.current = null;
     cameraFrameDecodingRef.current = true;
 
-    const nextUrl = URL.createObjectURL(new Blob([frame], { type: "image/jpeg" }));
+    const nextUrl = URL.createObjectURL(
+      new Blob([pendingFrame.frame], { type: "image/jpeg" })
+    );
     const decoder = new Image();
     decoder.decoding = "async";
     cameraDecoderRef.current = decoder;
@@ -155,6 +162,7 @@ export default function useVehicleController() {
       } else {
         URL.revokeObjectURL(nextUrl);
       }
+      pendingFrame.acknowledge(publish && !cameraFrameDisposedRef.current);
 
       cameraFrameDecodingRef.current = false;
       if (pendingCameraFrameRef.current && !cameraFrameDisposedRef.current) {
@@ -168,10 +176,17 @@ export default function useVehicleController() {
   }, [replaceCameraFrame]);
 
   const handleBinaryCameraFrame = useCallback(
-    (frame: ArrayBuffer) => {
+    (
+      frame: ArrayBuffer,
+      delivery: { acknowledge: (displayed: boolean) => void }
+    ) => {
       cameraLastSeenAtRef.current = Date.now();
       setCameraOnline(true);
-      pendingCameraFrameRef.current = frame;
+      pendingCameraFrameRef.current?.acknowledge(false);
+      pendingCameraFrameRef.current = {
+        frame,
+        acknowledge: delivery.acknowledge,
+      };
       decodeLatestCameraFrame();
     },
     [decodeLatestCameraFrame]

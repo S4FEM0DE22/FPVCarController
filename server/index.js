@@ -48,6 +48,9 @@ const CAMERA_FRAME_MAX_BYTES = Number(
 const CAMERA_CONTROLLER_MAX_BUFFERED_BYTES = Number(
   process.env.CAMERA_CONTROLLER_MAX_BUFFERED_BYTES || 128000
 );
+const CAMERA_RENDER_ACK_TIMEOUT_MS = Number(
+  process.env.CAMERA_RENDER_ACK_TIMEOUT_MS || 900
+);
 const CAMERA_LIVENESS_TIMEOUT_MS = Number(
   process.env.CAMERA_LIVENESS_TIMEOUT_MS || 10000
 );
@@ -272,6 +275,9 @@ function getVehicleEntry(vehicleId) {
       lastTelemetry: null,
       lastStatus: null,
       lastCameraFrame: null,
+      lastCameraFrameId: 0,
+      lastCameraFrameAt: 0,
+      pendingCameraFrameAcks: new Map(),
       lastCameraStreamStatus: null,
       lastDeviceLogs: [],
     });
@@ -306,6 +312,22 @@ function safeSendBinary(ws, payload) {
   }
 }
 
+function sendCameraFrameToController(ws, vehicleId, frameId, payload) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  if (ws.meta?.cameraFrameAwaitingAck) return false;
+
+  const metadataSent = safeSend(ws, {
+    type: "camera_frame_meta",
+    vehicleId,
+    frameId,
+    timestamp: Date.now(),
+  });
+  if (!metadataSent || !safeSendBinary(ws, payload)) return false;
+
+  if (ws.meta) ws.meta.cameraFrameAwaitingAck = frameId;
+  return true;
+}
+
 function broadcastToControllers(vehicleId, payload) {
   const entry = vehicleRegistry.get(vehicleId);
   if (!entry) return;
@@ -317,10 +339,34 @@ function broadcastToControllers(vehicleId, payload) {
 
 function broadcastBinaryToControllers(vehicleId, payload) {
   const entry = vehicleRegistry.get(vehicleId);
-  if (!entry) return;
+  if (!entry) return 0;
+
+  let recipientCount = 0;
 
   for (const client of entry.controllers) {
-    safeSendBinary(client, payload);
+    if (
+      sendCameraFrameToController(
+        client,
+        vehicleId,
+        entry.lastCameraFrameId,
+        payload
+      )
+    ) {
+      recipientCount += 1;
+    }
+  }
+
+  return recipientCount;
+}
+
+function clearPendingCameraFrameAcks(entry) {
+  if (!entry?.pendingCameraFrameAcks) return;
+  for (const pending of entry.pendingCameraFrameAcks.values()) {
+    clearTimeout(pending.timeoutId);
+  }
+  entry.pendingCameraFrameAcks.clear();
+  for (const controller of entry.controllers) {
+    if (controller.meta) controller.meta.cameraFrameAwaitingAck = null;
   }
 }
 
@@ -358,7 +404,10 @@ function removeSocketFromRegistry(ws) {
     if (wasActiveCamera) {
       entry.camera = null;
       entry.lastCameraFrame = null;
+      entry.lastCameraFrameId = 0;
+      entry.lastCameraFrameAt = 0;
       entry.lastCameraStreamStatus = null;
+      clearPendingCameraFrameAcks(entry);
 
       broadcastToControllers(meta.vehicleId, {
         type: "camera_status",
@@ -464,6 +513,7 @@ logger.info({
   cameraFrameMinIntervalMs: CAMERA_FRAME_MIN_INTERVAL_MS,
   cameraFrameMaxBytes: CAMERA_FRAME_MAX_BYTES,
   cameraControllerMaxBufferedBytes: CAMERA_CONTROLLER_MAX_BUFFERED_BYTES,
+  cameraRenderAckTimeoutMs: CAMERA_RENDER_ACK_TIMEOUT_MS,
   cameraLivenessTimeoutMs: CAMERA_LIVENESS_TIMEOUT_MS,
   vehicleLivenessTimeoutMs: VEHICLE_LIVENESS_TIMEOUT_MS,
   cameraLivenessCheckIntervalMs: CAMERA_LIVENESS_CHECK_INTERVAL_MS,
@@ -485,6 +535,7 @@ wss.on("connection", (ws, request) => {
     ip,
     lastCameraFrameAt: 0,
     cameraFrameSending: false,
+    cameraFrameAwaitingAck: null,
     cameraFrameSequence: 0,
     legacyCameraFrameId: null,
     lastSeenAt: Date.now(),
@@ -572,12 +623,91 @@ wss.on("connection", (ws, request) => {
       const entry = getVehicleEntry(vehicleId);
       const frame = Buffer.from(raw);
       entry.lastCameraFrame = frame;
-      broadcastBinaryToControllers(vehicleId, frame);
+      entry.lastCameraFrameId = frameId;
+      entry.lastCameraFrameAt = now;
+      const recipientCount = broadcastBinaryToControllers(vehicleId, frame);
+
+      if (recipientCount === 0) {
+        safeSend(ws, {
+          type: "camera_frame_ack",
+          frameId,
+          accepted: false,
+          reason: "no_ready_controller",
+          timestamp: now,
+        });
+        return;
+      }
+
+      const timeoutId = setTimeout(() => {
+        const pending = entry.pendingCameraFrameAcks.get(frameId);
+        if (!pending) return;
+        entry.pendingCameraFrameAcks.delete(frameId);
+        safeSend(pending.camera, {
+          type: "camera_frame_ack",
+          frameId,
+          accepted: false,
+          reason: "render_timeout",
+          timestamp: Date.now(),
+        });
+      }, CAMERA_RENDER_ACK_TIMEOUT_MS);
+      timeoutId.unref?.();
+      entry.pendingCameraFrameAcks.set(frameId, { camera: ws, timeoutId });
+      return;
+    }
+
+    let data;
+
+    try {
+      data = JSON.parse(raw.toString());
+    } catch (error) {
       safeSend(ws, {
+        type: "error",
+        message: "Invalid JSON",
+      });
+      logger.warn({
+        event: "message.invalid_json",
+        ip,
+        connectionId,
+      });
+      return;
+    }
+
+    // This ACK is high-frequency stream flow control, not a user command.
+    if (data.type === "camera_frame_rendered") {
+      const { clientType, vehicleId } = ws.meta;
+      const frameId = Number(data.frameId);
+      if (
+        clientType !== "web-controller" ||
+        !vehicleId ||
+        !Number.isSafeInteger(frameId) ||
+        frameId <= 0
+      ) {
+        return;
+      }
+
+      const entry = getVehicleEntry(vehicleId);
+      if (ws.meta.cameraFrameAwaitingAck === frameId) {
+        ws.meta.cameraFrameAwaitingAck = null;
+      }
+
+      const pending = entry.pendingCameraFrameAcks.get(frameId);
+      if (!pending) return;
+
+      if (data.displayed === false) {
+        const anotherControllerIsRendering = [...entry.controllers].some(
+          (controller) => controller.meta?.cameraFrameAwaitingAck === frameId
+        );
+        if (anotherControllerIsRendering) return;
+      }
+
+      clearTimeout(pending.timeoutId);
+      entry.pendingCameraFrameAcks.delete(frameId);
+      safeSend(pending.camera, {
         type: "camera_frame_ack",
         frameId,
-        accepted: true,
-        timestamp: now,
+        accepted: data.displayed !== false,
+        reason: data.displayed === false ? "decode_failed" : undefined,
+        timestamp: Date.now(),
       });
       return;
     }
@@ -596,23 +726,6 @@ wss.on("connection", (ws, request) => {
         connectionId,
         retryAfterMs: rate.retryAfterMs,
         messageCount: rate.count,
-      });
-      return;
-    }
-
-    let data;
-
-    try {
-      data = JSON.parse(raw.toString());
-    } catch (error) {
-      safeSend(ws, {
-        type: "error",
-        message: "Invalid JSON",
-      });
-      logger.warn({
-        event: "message.invalid_json",
-        ip,
-        connectionId,
       });
       return;
     }
@@ -687,6 +800,7 @@ wss.on("connection", (ws, request) => {
         }
       } else if (clientType === "esp-cam") {
         const previousCamera = entry.camera;
+        clearPendingCameraFrameAcks(entry);
         entry.camera = ws;
         if (previousCamera && previousCamera !== ws) {
           previousCamera.terminate();
@@ -720,9 +834,18 @@ wss.on("connection", (ws, request) => {
           safeSend(ws, entry.lastStatus);
         }
 
-        if (entry.camera && entry.lastCameraFrame) {
+        if (
+          entry.camera &&
+          entry.lastCameraFrame &&
+          Date.now() - entry.lastCameraFrameAt <= CAMERA_RENDER_ACK_TIMEOUT_MS
+        ) {
           if (Buffer.isBuffer(entry.lastCameraFrame)) {
-            safeSendBinary(ws, entry.lastCameraFrame);
+            sendCameraFrameToController(
+              ws,
+              vehicleId,
+              entry.lastCameraFrameId,
+              entry.lastCameraFrame
+            );
           } else {
             safeSend(ws, entry.lastCameraFrame);
           }

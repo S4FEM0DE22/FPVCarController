@@ -628,8 +628,11 @@ void sendCloudFrame() {
   if (!cameraReady || !wsConnected) return;
 
   const unsigned long now = millis();
-  if (now - lastFrameAt < cloudFrameIntervalMs) return;
   expirePendingCloudFrameAcks(now);
+  // Keep at most one JPEG in flight. WebSocket/TCP is ordered, so allowing
+  // several unacknowledged frames only makes an old-picture queue.
+  if (hasPendingCloudFrameAcks()) return;
+  if (now - lastFrameAt < cloudFrameIntervalMs) return;
   lastFrameAt = now;
 
   camera_fb_t *fb = esp_camera_fb_get();

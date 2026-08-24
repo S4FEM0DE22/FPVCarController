@@ -346,6 +346,10 @@ test("binary camera frames relay without base64 encoding", async () => {
     );
 
     const jpegFrame = Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x01, 0xff, 0xd9]);
+    const frameMeta = waitForMessage(
+      controller,
+      (msg) => msg.type === "camera_frame_meta"
+    );
     const receivedFrame = waitForBinaryMessage(controller);
     const frameAck = waitForMessage(
       camera,
@@ -353,7 +357,13 @@ test("binary camera frames relay without base64 encoding", async () => {
     );
     camera.send(jpegFrame, { binary: true });
 
+    const metadata = await frameMeta;
     assert.deepEqual(await receivedFrame, jpegFrame);
+    sendJson(controller, {
+      type: "camera_frame_rendered",
+      frameId: metadata.frameId,
+      displayed: true,
+    });
     assert.equal((await frameAck).accepted, true);
   } finally {
     camera.close();
@@ -378,6 +388,10 @@ test("binary camera frame acknowledgements use a monotonic frame ID", async () =
     });
     await waitForMessage(controller, (msg) => msg.type === "ack");
 
+    const frameMeta = waitForMessage(
+      controller,
+      (msg) => msg.type === "camera_frame_meta" && msg.frameId === 1
+    );
     const frameAck = waitForMessage(
       camera,
       (msg) => msg.type === "camera_frame_ack" && msg.frameId === 1
@@ -387,6 +401,12 @@ test("binary camera frame acknowledgements use a monotonic frame ID", async () =
       { binary: true }
     );
 
+    const metadata = await frameMeta;
+    sendJson(controller, {
+      type: "camera_frame_rendered",
+      frameId: metadata.frameId,
+      displayed: true,
+    });
     const ack = await frameAck;
     assert.equal(ack.accepted, true);
     assert.equal(ack.frameId, 1);
@@ -400,16 +420,27 @@ test("relay accepts the previous explicit camera frame header during rollout", a
   const vehicleId = `test-camera-legacy-frame-id-${Date.now()}`;
   const url = `ws://127.0.0.1:${serverPort}`;
   const camera = await connectClient(url);
+  const controller = await connectClient(url);
 
   try {
     sendJson(camera, { type: "identify", clientType: "esp-cam", vehicleId });
     await waitForMessage(camera, (msg) => msg.type === "ack");
+    sendJson(controller, {
+      type: "identify",
+      clientType: "web-controller",
+      vehicleId,
+    });
+    await waitForMessage(controller, (msg) => msg.type === "ack");
 
     const header = Buffer.alloc(8);
     header.write("FPV1", 0, "ascii");
     header.writeUInt32BE(27, 4);
     camera.send(header, { binary: true });
 
+    const frameMeta = waitForMessage(
+      controller,
+      (msg) => msg.type === "camera_frame_meta" && msg.frameId === 27
+    );
     const frameAck = waitForMessage(
       camera,
       (msg) => msg.type === "camera_frame_ack" && msg.frameId === 27
@@ -419,9 +450,16 @@ test("relay accepts the previous explicit camera frame header during rollout", a
       { binary: true }
     );
 
+    const metadata = await frameMeta;
+    sendJson(controller, {
+      type: "camera_frame_rendered",
+      frameId: metadata.frameId,
+      displayed: true,
+    });
     assert.equal((await frameAck).accepted, true);
   } finally {
     camera.close();
+    controller.close();
   }
 });
 

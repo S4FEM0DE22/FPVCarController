@@ -8,7 +8,13 @@ export type ConnectionState =
 
 export interface UseVehicleSocketOptions {
   onMessage?: (message: import("@/types/socket").IncomingMessage) => void;
-  onCameraFrame?: (frame: ArrayBuffer) => void;
+  onCameraFrame?: (
+    frame: ArrayBuffer,
+    delivery: {
+      frameId: number | null;
+      acknowledge: (displayed: boolean) => void;
+    }
+  ) => void;
 }
 
 const RECONNECT_BASE_DELAY_MS = 750;

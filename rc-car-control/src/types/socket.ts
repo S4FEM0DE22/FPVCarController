@@ -69,6 +69,21 @@ export interface CameraFrameMessage {
   timestamp: number;
 }
 
+export interface CameraFrameMetaMessage {
+  type: "camera_frame_meta";
+  vehicleId: string;
+  frameId: number;
+  timestamp: number;
+}
+
+export interface CameraFrameRenderedMessage {
+  type: "camera_frame_rendered";
+  vehicleId: string;
+  frameId: number;
+  displayed: boolean;
+  timestamp: number;
+}
+
 export interface CameraStatusMessage {
   type: "camera_status";
   vehicleId: string;
@@ -148,11 +163,13 @@ export type OutgoingMessage =
   | ControlMessage
   | ActionMessage
   | IdentifyMessage
-  | PingMessage;
+  | PingMessage
+  | CameraFrameRenderedMessage;
 
 export type IncomingMessage =
   | TelemetryMessage
   | CameraFrameMessage
+  | CameraFrameMetaMessage
   | CameraStatusMessage
   | CameraStreamStatusMessage
   | DeviceLogMessage
