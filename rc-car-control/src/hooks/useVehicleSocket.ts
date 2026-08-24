@@ -8,6 +8,7 @@ import type { IncomingMessage, OutgoingMessage } from "@/types/socket";
 import {
   ACK_MAX_RETRIES,
   ACK_TIMEOUT_MS,
+  WIFI_UPDATE_ACK_TIMEOUT_MS,
   HEARTBEAT_PING_INTERVAL_MS,
   HEARTBEAT_PONG_TIMEOUT_MS,
   MAX_OUTBOUND_QUEUE_SIZE,
@@ -127,7 +128,11 @@ export default function useVehicleSocket(
         const latest = pendingAckRef.current.get(commandId);
         if (!latest) return;
 
-        if (latest.retries >= ACK_MAX_RETRIES) {
+        const isWifiUpdate =
+          latest.payload.type === "action" && latest.payload.action === "WIFI_SET";
+        const maxRetries = isWifiUpdate ? 0 : ACK_MAX_RETRIES;
+
+        if (latest.retries >= maxRetries) {
           pendingAckRef.current.delete(commandId);
           updatePendingAckCount();
           setLastError(`Command ACK timeout: ${commandId}`);
@@ -157,7 +162,9 @@ export default function useVehicleSocket(
         }
 
         scheduleAckTimeout(commandId);
-      }, ACK_TIMEOUT_MS);
+      }, pending.payload.type === "action" && pending.payload.action === "WIFI_SET"
+        ? WIFI_UPDATE_ACK_TIMEOUT_MS
+        : ACK_TIMEOUT_MS);
     },
     [updatePendingAckCount]
   );

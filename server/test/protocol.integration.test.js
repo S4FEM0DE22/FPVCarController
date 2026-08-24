@@ -50,7 +50,8 @@ function startServer() {
       CAMERA_LIVENESS_TIMEOUT_MS: "1500",
       VEHICLE_LIVENESS_TIMEOUT_MS: "1500",
       CAMERA_LIVENESS_CHECK_INTERVAL_MS: "100",
-      WIFI_UPDATE_ACK_TIMEOUT_MS: "300",
+      WIFI_UPDATE_ACK_TIMEOUT_MS: "1500",
+      WIFI_PREPARE_ACK_TIMEOUT_MS: "300",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -561,7 +562,7 @@ test("camera stream profile reaches esp-cam without the vehicle ESP", async () =
   }
 });
 
-test("wifi update is sent to the vehicle once and completes after its ESP-NOW acknowledgement", async () => {
+test("wifi update commits only after vehicle and camera reach the candidate network", async () => {
   const vehicleId = `test-shared-wifi-${Date.now()}`;
   const url = `ws://127.0.0.1:${serverPort}`;
   const esp = await connectClient(url);
@@ -581,18 +582,14 @@ test("wifi update is sent to the vehicle once and completes after its ESP-NOW ac
     await waitForMessage(controller, (msg) => msg.type === "ack");
 
     const commandId = `wifi-set-${Date.now()}`;
-    const vehicleUpdate = waitForMessage(
+    const vehiclePrepare = waitForMessage(
       esp,
-      (msg) => msg.type === "action" && msg.commandId === commandId
+      (msg) => msg.type === "action" && msg.action === "WIFI_PREPARE" && msg.commandId === commandId
     );
-    let cameraReceivedCredentials = false;
-    const onCameraMessage = (raw) => {
-      const message = JSON.parse(raw.toString());
-      if (message.type === "action" && message.commandId === commandId) {
-        cameraReceivedCredentials = true;
-      }
-    };
-    camera.on("message", onCameraMessage);
+    const cameraPrepare = waitForMessage(
+      camera,
+      (msg) => msg.type === "action" && msg.action === "WIFI_WAIT_FOR_VEHICLE" && msg.commandId === commandId
+    );
 
     sendJson(controller, {
       type: "action",
@@ -604,28 +601,56 @@ test("wifi update is sent to the vehicle once and completes after its ESP-NOW ac
       commandId,
     });
 
-    assert.deepEqual((await vehicleUpdate).payload, {
+    assert.deepEqual((await vehiclePrepare).payload, {
       ssid: "New Network",
       password: "new-password",
     });
-    await delay(50);
-    camera.off("message", onCameraMessage);
-    assert.equal(cameraReceivedCredentials, false);
+    assert.deepEqual((await cameraPrepare).payload, {});
 
+    const vehicleApply = waitForMessage(
+      esp,
+      (msg) => msg.type === "action" && msg.action === "WIFI_APPLY" && msg.commandId === commandId
+    );
+    sendJson(esp, {
+      type: "wifi_phase_ack", vehicleId, commandId,
+      phase: "prepared", ok: true,
+      ssid: "New Network",
+    });
+    sendJson(esp, {
+      type: "wifi_local_camera_ready", vehicleId, commandId,
+      ssid: "New Network",
+    });
+    assert.equal((await vehicleApply).action, "WIFI_APPLY");
+
+    sendJson(esp, {
+      type: "wifi_phase_ack", vehicleId, commandId,
+      phase: "armed", ok: true, ssid: "New Network",
+    });
+
+    const vehicleCommit = waitForMessage(
+      esp,
+      (msg) => msg.type === "action" && msg.action === "WIFI_COMMIT" && msg.commandId === commandId
+    );
+    const cameraCommit = waitForMessage(
+      camera,
+      (msg) => msg.type === "action" && msg.action === "WIFI_COMMIT" && msg.commandId === commandId
+    );
     const controllerAck = waitForMessage(
       controller,
       (msg) => msg.type === "ack" && msg.commandId === commandId
     );
     sendJson(esp, {
-      type: "wifi_update_ack",
-      vehicleId,
-      commandId,
-      ssid: "New Network",
-      saved: true,
-      cameraAcked: true,
-      connected: true,
+      type: "wifi_candidate_status", vehicleId, commandId,
+      state: "connected", ssid: "New Network", gateway: "192.168.50.1",
     });
-    assert.match((await controllerAck).message, /switching now/i);
+    sendJson(camera, {
+      type: "wifi_candidate_status", vehicleId, commandId,
+      state: "connected", ssid: "New Network", gateway: "192.168.50.1",
+    });
+
+    assert.equal((await vehicleCommit).action, "WIFI_COMMIT");
+    assert.equal((await cameraCommit).action, "WIFI_COMMIT");
+    assert.match((await controllerAck).message, /online through New Network/i);
   } finally {
     esp.close();
     camera.close();
@@ -633,7 +658,7 @@ test("wifi update is sent to the vehicle once and completes after its ESP-NOW ac
   }
 });
 
-test("wifi update times out when the vehicle cannot synchronize with the camera", async () => {
+test("wifi update rolls both devices back when preparation times out", async () => {
   const vehicleId = `test-shared-wifi-rollback-${Date.now()}`;
   const url = `ws://127.0.0.1:${serverPort}`;
   const esp = await connectClient(url);
@@ -653,21 +678,25 @@ test("wifi update times out when the vehicle cannot synchronize with the camera"
     await waitForMessage(controller, (msg) => msg.type === "ack");
 
     const commandId = `wifi-timeout-${Date.now()}`;
-    let cameraReceivedCredentials = false;
-    const onCameraMessage = (raw) => {
-      const message = JSON.parse(raw.toString());
-      if (message.type === "action" && message.commandId === commandId) {
-        cameraReceivedCredentials = true;
-      }
-    };
-    camera.on("message", onCameraMessage);
-    const vehicleUpdate = waitForMessage(
+    const vehiclePrepare = waitForMessage(
       esp,
-      (msg) => msg.type === "action" && msg.commandId === commandId
+      (msg) => msg.type === "action" && msg.action === "WIFI_PREPARE" && msg.commandId === commandId
+    );
+    const cameraPrepare = waitForMessage(
+      camera,
+      (msg) => msg.type === "action" && msg.action === "WIFI_WAIT_FOR_VEHICLE" && msg.commandId === commandId
     );
     const controllerError = waitForMessage(
       controller,
       (msg) => msg.type === "error" && msg.commandId === commandId
+    );
+    const vehicleRollback = waitForMessage(
+      esp,
+      (msg) => msg.type === "action" && msg.action === "WIFI_ROLLBACK" && msg.commandId === commandId
+    );
+    const cameraRollback = waitForMessage(
+      camera,
+      (msg) => msg.type === "action" && msg.action === "WIFI_ROLLBACK" && msg.commandId === commandId
     );
 
     sendJson(controller, {
@@ -680,11 +709,11 @@ test("wifi update times out when the vehicle cannot synchronize with the camera"
       commandId,
     });
 
-    await vehicleUpdate;
-    assert.match((await controllerError).message, /ESP-NOW acknowledgement/i);
-    await delay(50);
-    camera.off("message", onCameraMessage);
-    assert.equal(cameraReceivedCredentials, false);
+    await vehiclePrepare;
+    await cameraPrepare;
+    assert.match((await controllerError).message, /in time/i);
+    assert.equal((await vehicleRollback).action, "WIFI_ROLLBACK");
+    assert.equal((await cameraRollback).action, "WIFI_ROLLBACK");
   } finally {
     esp.close();
     camera.close();

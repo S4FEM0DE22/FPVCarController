@@ -69,7 +69,7 @@ Default TB6612FNG pins are declared at the top of the sketch. Change them to mat
 1. Open `esp32-cam/esp32-cam.ino`.
 2. Select `AI Thinker ESP32-CAM`, then flash it.
 3. Power it on together with the ESP32 vehicle during first-time setup.
-4. The ESP32-CAM does not open its own setup portal. It saves the vehicle configuration through the temporary setup network, exchanges ESP-NOW peer MAC addresses with the vehicle, acknowledges the save, and then both boards join the same network once.
+4. The ESP32-CAM does not open its own setup portal. It receives the vehicle configuration through the temporary `FPV-Car-Setup` network, acknowledges the save, and then both boards join the same network once.
 5. After saving Wi-Fi, open the camera IP. It redirects to:
 
 ```text
@@ -93,15 +93,17 @@ Deploy the updated relay and web app before flashing this ESP32-CAM firmware. Th
 The controller page can change Wi-Fi for both boards from one form:
 
 - The web app sends `WIFI_SCAN` through the cloud relay. The ESP32 scans nearby 2.4 GHz networks and returns SSID, signal strength, channel, and security status for the selection list.
-- The relay sends `WIFI_SET` only once, to the main ESP32. Wi-Fi credentials are not forwarded to ESP32-CAM through the cloud.
-- The main ESP32 sends an encrypted ESP-NOW prepare packet to its paired ESP32-CAM and waits for an acknowledgement.
-- The main ESP32 then sends an ESP-NOW apply packet. ESP32-CAM saves the credentials and acknowledges again before the vehicle saves its copy.
-- After both acknowledgements, the vehicle reports `wifi_update_ack` to the relay and both boards switch networks once after a short coordinated delay.
-- If ESP-NOW pairing or either acknowledgement fails, the active Wi-Fi remains unchanged on the vehicle and the web app reports the failure.
+- The web app sends one `WIFI_SET` request. The relay sends the candidate credentials only to the main ESP32 and tells ESP32-CAM to enter local receive mode without including the SSID or password.
+- The main ESP32 keeps its current cloud connection and opens a temporary `FPV-Car-Handoff` access point. ESP32-CAM pauses frames, disconnects temporarily, and downloads the candidate directly from the vehicle.
+- ESP32-CAM acknowledges the candidate to the vehicle over the temporary network. The relay then authorizes apply, and the camera polls the vehicle for the coordinated switch time.
+- Both boards retain their previous active credentials while testing the candidate network.
+- The relay sends `WIFI_COMMIT` only after both boards report that they are online through the selected SSID. Only then does each board save the candidate as its active Wi-Fi.
+- If a board fails to prepare, connect, or return to the relay before the timeout, `WIFI_ROLLBACK` restores the previous network. A local commit timeout provides the same recovery if the relay becomes unavailable.
+- ESP32-CAM pauses cloud frames during the transaction so camera traffic cannot delay Wi-Fi coordination.
 - The controller does not need direct access to the camera IP, so the change also works when the browser and car use different networks.
 - Settings compares the SSID and gateway reported by both boards and shows whether they are on the same Wi-Fi.
 
-If the new Wi-Fi credentials are incorrect, both boards restart their recovery flow after about 25 seconds. Connect to `FPV-Car-Setup` to correct them.
+If the new Wi-Fi credentials are incorrect, both boards automatically reconnect to the previous saved network. `FPV-Car-Setup` is needed only for first-time setup or after explicitly clearing saved Wi-Fi.
 
 The relay treats the camera as offline after about 10 seconds without a frame or stream-status message. It clears the cached frame at the same time, preventing the controller from showing a stale online state after camera power is removed.
 

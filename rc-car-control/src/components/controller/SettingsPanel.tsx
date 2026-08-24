@@ -131,6 +131,7 @@ export default function SettingsPanel({
       vehicleWifiGateway === cameraWifiGateway);
   const networkReady =
     vehicleOnline &&
+    cameraOnline &&
     Boolean(selectedNetwork) &&
     (!selectedNetwork?.secure || password.length > 0);
 
@@ -173,11 +174,11 @@ export default function SettingsPanel({
     try {
       await onChangeWifi(nextSsid, password);
       setMessage(
-        "รถและกล้องบันทึก Wi-Fi ชุดเดียวกันแล้ว กำลังย้ายไปเครือข่ายใหม่"
+        "รถและกล้องเชื่อมเครือข่ายใหม่สำเร็จ และบันทึกค่าเรียบร้อยแล้ว"
       );
       setPassword("");
     } catch {
-      setMessage("ส่งค่า Wi-Fi ไม่สำเร็จ ตรวจว่าเปิดกล้องและจับคู่ ESP-NOW แล้ว จากนั้นลองอีกครั้ง");
+      setMessage("เปลี่ยน Wi-Fi ไม่สำเร็จ ระบบกำลังกลับไปใช้เครือข่ายเดิม ตรวจว่ารถ กล้อง และ Hotspot ยังเปิดอยู่แล้วลองอีกครั้ง");
     } finally {
       setSubmitting(false);
     }
@@ -406,7 +407,7 @@ export default function SettingsPanel({
                   <h3 className="text-sm font-semibold text-neutral-800">เปลี่ยน Wi-Fi ของรถและกล้อง</h3>
                 </div>
                 <p className="mb-3 text-xs leading-5 text-slate-500">
-                  Cloud ส่งค่าให้ ESP32 หลักครั้งเดียว จากนั้นรถส่งต่อให้กล้องผ่าน ESP-NOW และทั้งคู่จึงเปลี่ยนพร้อมกัน
+                  Cloud ส่งค่าให้ ESP32 หลัก จากนั้นกล้องจะรับค่าจากรถโดยตรง และบันทึกถาวรเมื่อทั้งคู่กลับมาออนไลน์สำเร็จ
                 </p>
 
                 <div className="space-y-3">
@@ -566,6 +567,8 @@ export default function SettingsPanel({
                       ? "กำลังส่งค่า..."
                       : !vehicleOnline
                       ? "รอ ESP32 ออนไลน์"
+                      : !cameraOnline
+                      ? "รอ ESP32-CAM ออนไลน์"
                       : selectedNetwork
                       ? `ใช้ ${selectedNetwork.ssid} กับรถและกล้อง`
                       : "เลือก Wi-Fi ก่อน"}
