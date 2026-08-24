@@ -51,6 +51,9 @@ const CAMERA_CONTROLLER_MAX_BUFFERED_BYTES = Number(
 const CAMERA_LIVENESS_TIMEOUT_MS = Number(
   process.env.CAMERA_LIVENESS_TIMEOUT_MS || 10000
 );
+const VEHICLE_LIVENESS_TIMEOUT_MS = Number(
+  process.env.VEHICLE_LIVENESS_TIMEOUT_MS || 8000
+);
 const CAMERA_LIVENESS_CHECK_INTERVAL_MS = Number(
   process.env.CAMERA_LIVENESS_CHECK_INTERVAL_MS || 2000
 );
@@ -343,8 +346,10 @@ function removeSocketFromRegistry(ws) {
         type: "status",
         vehicleId: meta.vehicleId,
         state: "offline",
-        message: "ESP disconnected",
+        message: meta.espDisconnectMessage || "ESP disconnected",
       });
+      entry.lastTelemetry = null;
+      entry.lastStatus = null;
     }
   }
 
@@ -400,10 +405,27 @@ function removeSocketFromRegistry(ws) {
   }
 }
 
-function expireStaleCameraConnections() {
+function expireStaleDeviceConnections() {
   const now = Date.now();
 
   for (const [vehicleId, entry] of vehicleRegistry.entries()) {
+    const esp = entry.esp;
+    if (esp) {
+      const lastSeenAt = Number(esp.meta?.lastSeenAt || 0);
+      if (!lastSeenAt || now - lastSeenAt > VEHICLE_LIVENESS_TIMEOUT_MS) {
+        if (esp.meta) {
+          esp.meta.espDisconnectMessage = "ESP32 timed out";
+        }
+        logger.warn({
+          event: "vehicle.liveness_timeout",
+          vehicleId,
+          connectionId: esp.meta?.connectionId || null,
+          lastSeenAgeMs: lastSeenAt > 0 ? now - lastSeenAt : null,
+        });
+        esp.terminate();
+      }
+    }
+
     const camera = entry.camera;
     if (!camera) continue;
 
@@ -425,11 +447,11 @@ function expireStaleCameraConnections() {
   }
 }
 
-const cameraLivenessTimer = setInterval(
-  expireStaleCameraConnections,
+const deviceLivenessTimer = setInterval(
+  expireStaleDeviceConnections,
   CAMERA_LIVENESS_CHECK_INTERVAL_MS
 );
-cameraLivenessTimer.unref();
+deviceLivenessTimer.unref();
 
 logger.info({
   event: "server.started",
@@ -443,6 +465,7 @@ logger.info({
   cameraFrameMaxBytes: CAMERA_FRAME_MAX_BYTES,
   cameraControllerMaxBufferedBytes: CAMERA_CONTROLLER_MAX_BUFFERED_BYTES,
   cameraLivenessTimeoutMs: CAMERA_LIVENESS_TIMEOUT_MS,
+  vehicleLivenessTimeoutMs: VEHICLE_LIVENESS_TIMEOUT_MS,
   cameraLivenessCheckIntervalMs: CAMERA_LIVENESS_CHECK_INTERVAL_MS,
   controllerAuthEnabled: Boolean(CONTROLLER_AUTH_TOKEN),
   vehicleAuthEnabled: Boolean(VEHICLE_AUTH_TOKEN),
@@ -466,6 +489,7 @@ wss.on("connection", (ws, request) => {
     legacyCameraFrameId: null,
     lastSeenAt: Date.now(),
     cameraDisconnectMessage: null,
+    espDisconnectMessage: null,
   };
 
   logger.info({
@@ -1087,6 +1111,14 @@ wss.on("connection", (ws, request) => {
         jpegQuality: Math.max(0, Math.min(63, Number(data.jpegQuality) || 0)),
         rssi: Math.max(-120, Math.min(0, Number(data.rssi) || -120)),
         timeouts: Math.max(0, Number(data.timeouts) || 0),
+        wifiSsid:
+          typeof data.wifiSsid === "string"
+            ? data.wifiSsid.trim().slice(0, 64)
+            : "",
+        wifiGateway:
+          typeof data.wifiGateway === "string"
+            ? data.wifiGateway.trim().slice(0, 45)
+            : "",
         timestamp: Date.now(),
       };
 
@@ -1155,8 +1187,19 @@ wss.on("connection", (ws, request) => {
         return;
       }
 
-      entry.lastTelemetry = data;
-      broadcastToControllers(vehicleId, data);
+      const telemetry = {
+        ...data,
+        wifiSsid:
+          typeof data.wifiSsid === "string"
+            ? data.wifiSsid.trim().slice(0, 64)
+            : "",
+        wifiGateway:
+          typeof data.wifiGateway === "string"
+            ? data.wifiGateway.trim().slice(0, 45)
+            : "",
+      };
+      entry.lastTelemetry = telemetry;
+      broadcastToControllers(vehicleId, telemetry);
 
       logger.info({
         event: "telemetry.received",

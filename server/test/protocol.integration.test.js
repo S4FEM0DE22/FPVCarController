@@ -48,6 +48,7 @@ function startServer() {
       CONTROL_ACTION_RATE_LIMIT_WINDOW_MS: "5000",
       CONTROL_ACTION_RATE_LIMIT_MAX_MESSAGES: "5",
       CAMERA_LIVENESS_TIMEOUT_MS: "1500",
+      VEHICLE_LIVENESS_TIMEOUT_MS: "1500",
       CAMERA_LIVENESS_CHECK_INTERVAL_MS: "100",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -287,6 +288,8 @@ test("telemetry broadcast delivers esp telemetry to controller", async () => {
       online: true,
       battery: 88,
       wifi: -58,
+      wifiSsid: "FPV Lab",
+      wifiGateway: "192.168.10.1",
       latency: 42,
       cameraOn: true,
       driveState: {
@@ -308,6 +311,8 @@ test("telemetry broadcast delivers esp telemetry to controller", async () => {
 
     assert.equal(received.battery, telemetryPayload.battery);
     assert.equal(received.wifi, telemetryPayload.wifi);
+    assert.equal(received.wifiSsid, telemetryPayload.wifiSsid);
+    assert.equal(received.wifiGateway, telemetryPayload.wifiGateway);
     assert.equal(received.latency, telemetryPayload.latency);
     assert.equal(received.cameraOn, telemetryPayload.cameraOn);
     assert.deepEqual(received.driveState, telemetryPayload.driveState);
@@ -601,6 +606,8 @@ test("camera stream status is sanitized and relayed to controllers", async () =>
       jpegQuality: 23,
       rssi: -48,
       timeouts: 2,
+      wifiSsid: "FPV Lab",
+      wifiGateway: "192.168.10.1",
     });
 
     const status = await statusMessage;
@@ -609,6 +616,8 @@ test("camera stream status is sanitized and relayed to controllers", async () =>
     assert.equal(status.fps, 12.4);
     assert.equal(status.ackMs, 87);
     assert.equal(status.frameBytes, 18400);
+    assert.equal(status.wifiSsid, "FPV Lab");
+    assert.equal(status.wifiGateway, "192.168.10.1");
   } finally {
     camera.close();
     controller.close();
@@ -643,6 +652,37 @@ test("camera is marked offline when its connection stops sending data", async ()
     assert.match(offline.message, /timed out/i);
   } finally {
     camera.close();
+    controller.close();
+  }
+});
+
+test("vehicle is marked offline when telemetry and status stop", async () => {
+  const vehicleId = `test-vehicle-liveness-${Date.now()}`;
+  const url = `ws://127.0.0.1:${serverPort}`;
+  const esp = await connectClient(url);
+  const controller = await connectClient(url);
+
+  try {
+    sendJson(esp, { type: "identify", clientType: "esp", vehicleId });
+    await waitForMessage(esp, (msg) => msg.type === "ack");
+    sendJson(controller, {
+      type: "identify",
+      clientType: "web-controller",
+      vehicleId,
+    });
+    await waitForMessage(controller, (msg) => msg.type === "ack");
+
+    const offline = await waitForMessage(
+      controller,
+      (msg) =>
+        msg.type === "status" &&
+        msg.vehicleId === vehicleId &&
+        msg.state === "offline"
+    );
+
+    assert.match(offline.message, /timed out/i);
+  } finally {
+    esp.close();
     controller.close();
   }
 });

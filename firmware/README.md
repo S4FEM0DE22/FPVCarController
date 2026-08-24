@@ -30,6 +30,8 @@ Use this flow when the ESP32 vehicle and ESP32-CAM have no saved Wi-Fi yet:
 http://192.168.4.1
 ```
 
+On most phones and tablets, the setup page now opens automatically as a captive portal. Use `192.168.4.1` only when the popup does not appear.
+
 5. Choose your Wi-Fi/hotspot, enter the password once, and fill in the controller/cloud settings.
 6. Press `Save and connect both boards`.
 
@@ -38,8 +40,10 @@ After saving:
 - The ESP32 vehicle saves the Wi-Fi and keeps `FPV-Car-Setup` active.
 - The ESP32-CAM fetches the same Wi-Fi/controller/cloud settings and saves them to Preferences.
 - The ESP32-CAM acknowledges that the settings were saved, then both boards connect to the new Wi-Fi.
+- The progress page shows whether the camera has received the settings and whether the vehicle connected successfully.
+- If the password is incorrect, the setup network remains available so the value can be corrected.
 
-On later boots, the vehicle briefly exposes the setup AP so the camera can verify that both saved configurations match. When they match, the camera acknowledges immediately and both boards continue to the saved Wi-Fi. You do not need to open the setup page again unless you clear settings or the saved Wi-Fi cannot be reached.
+On later boots, the vehicle briefly exposes a hidden `FPV-Car-Sync` channel so the camera can verify that both saved configurations match. When they match, the camera acknowledges immediately and both boards continue to the saved Wi-Fi. The visible `FPV-Car-Setup` network appears only when setup or recovery is required.
 
 ## ESP32 Vehicle Setup
 
@@ -90,8 +94,9 @@ The controller page can change Wi-Fi for both boards from one form:
 - The relay forwards one `WIFI_SET` action to both the ESP32 vehicle and ESP32-CAM over their existing secure WebSocket connections.
 - Both boards save the new Wi-Fi to Preferences, send their final status, then reconnect after a short delay.
 - The controller does not need direct access to the camera IP, so the change also works when the browser and car use different networks.
+- Settings compares the SSID and gateway reported by both boards and shows whether they are on the same Wi-Fi.
 
-If the new Wi-Fi credentials are incorrect, power-cycle both boards and reconnect to `FPV-Car-Setup` to correct them.
+If the new Wi-Fi credentials are incorrect, both boards restart their recovery flow after about 25 seconds. Connect to `FPV-Car-Setup` to correct them.
 
 The relay treats the camera as offline after about 10 seconds without a frame or stream-status message. It clears the cached frame at the same time, preventing the controller from showing a stale online state after camera power is removed.
 

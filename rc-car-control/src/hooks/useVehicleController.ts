@@ -247,6 +247,8 @@ export default function useVehicleController() {
           online: nextOnline,
           battery: message.battery,
           wifi: message.wifi,
+          wifiSsid: message.wifiSsid ?? prev.wifiSsid,
+          wifiGateway: message.wifiGateway ?? prev.wifiGateway,
           latency: message.latency,
           cameraOn,
           driveState: nextDriveState,

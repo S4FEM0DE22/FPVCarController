@@ -46,6 +46,8 @@ export interface TelemetryMessage {
   online: boolean;
   battery: number;
   wifi: number;
+  wifiSsid?: string;
+  wifiGateway?: string;
   latency: number;
   cameraOn: boolean;
   driveState: VehicleDriveState;
@@ -88,6 +90,8 @@ export interface CameraStreamStatusMessage {
   jpegQuality: number;
   rssi: number;
   timeouts: number;
+  wifiSsid?: string;
+  wifiGateway?: string;
   timestamp: number;
 }
 

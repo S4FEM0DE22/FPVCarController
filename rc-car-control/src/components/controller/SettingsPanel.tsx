@@ -37,6 +37,10 @@ interface SettingsPanelProps {
   onChangeWifi: (ssid: string, password: string) => Promise<void> | void;
   vehicleOnline: boolean;
   cameraOnline: boolean;
+  vehicleWifiSsid?: string;
+  vehicleWifiGateway?: string;
+  cameraWifiSsid?: string;
+  cameraWifiGateway?: string;
   cameraStreamProfile: CameraStreamProfile;
   onChangeCameraStreamProfile: (profile: CameraStreamProfile) => Promise<void> | void;
   wifiNetworks: WifiNetwork[];
@@ -73,6 +77,10 @@ export default function SettingsPanel({
   onChangeWifi,
   vehicleOnline,
   cameraOnline,
+  vehicleWifiSsid,
+  vehicleWifiGateway,
+  cameraWifiSsid,
+  cameraWifiGateway,
   cameraStreamProfile,
   onChangeCameraStreamProfile,
   wifiNetworks,
@@ -114,8 +122,16 @@ export default function SettingsPanel({
   const cloudUrl = NETWORK_CONFIG.cloudUrl || "Local / custom WebSocket";
   const wsUrl = NETWORK_CONFIG.wsUrl;
   const selectedNetwork = wifiNetworks.find((network) => network.ssid === ssid);
+  const hasBothNetworkReports = Boolean(vehicleWifiSsid && cameraWifiSsid);
+  const sameWifi =
+    hasBothNetworkReports &&
+    vehicleWifiSsid === cameraWifiSsid &&
+    (!vehicleWifiGateway ||
+      !cameraWifiGateway ||
+      vehicleWifiGateway === cameraWifiGateway);
   const networkReady =
     vehicleOnline &&
+    cameraOnline &&
     Boolean(selectedNetwork) &&
     (!selectedNetwork?.secure || password.length > 0);
 
@@ -157,10 +173,10 @@ export default function SettingsPanel({
 
     try {
       await onChangeWifi(nextSsid, password);
-      setMessage("ส่งค่า WiFi ไปที่ ESP32 และ ESP32-CAM แล้ว");
+      setMessage("ส่งค่า Wi-Fi ให้ ESP32 และ ESP32-CAM แล้ว กำลังรอเชื่อมต่อใหม่");
       setPassword("");
     } catch {
-      setMessage("ส่งค่า WiFi ไปที่รถแล้ว แต่ ESP32-CAM อาจอัปเดตไม่สำเร็จ");
+      setMessage("ส่งค่า Wi-Fi ไม่สำเร็จ กรุณาตรวจว่าทั้งรถและกล้องออนไลน์");
     } finally {
       setSubmitting(false);
     }
@@ -309,6 +325,49 @@ export default function SettingsPanel({
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
           {activeTab === "network" ? (
             <>
+              <div
+                className={`rounded-lg border p-3 ${
+                  !vehicleOnline || !cameraOnline
+                    ? "border-amber-200 bg-amber-50"
+                    : !hasBothNetworkReports
+                    ? "border-sky-200 bg-sky-50"
+                    : sameWifi
+                    ? "border-emerald-200 bg-emerald-50"
+                    : "border-rose-200 bg-rose-50"
+                }`}
+              >
+                <div className="flex items-start gap-2.5">
+                  {vehicleOnline && cameraOnline && sameWifi ? (
+                    <Check size={18} className="mt-0.5 shrink-0 text-emerald-700" />
+                  ) : (
+                    <WifiOff size={18} className="mt-0.5 shrink-0 text-amber-700" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      {!vehicleOnline
+                        ? "ESP32 ยังไม่ออนไลน์"
+                        : !cameraOnline
+                        ? "ESP32-CAM ยังไม่ออนไลน์"
+                        : !hasBothNetworkReports
+                        ? "กำลังตรวจสอบเครือข่ายของสองบอร์ด"
+                        : sameWifi
+                        ? "รถและกล้องอยู่บน Wi-Fi เดียวกัน"
+                        : "รถและกล้องอยู่คนละเครือข่าย"}
+                    </h3>
+                    <p className="mt-1 text-xs leading-5 text-slate-600">
+                      ESP32: {vehicleOnline ? vehicleWifiSsid || "กำลังอ่านค่า" : "ออฟไลน์"}
+                      <br />
+                      ESP32-CAM: {cameraOnline ? cameraWifiSsid || "กำลังอ่านค่า" : "ออฟไลน์"}
+                    </p>
+                    {hasBothNetworkReports && !sameWifi && (
+                      <p className="mt-2 text-xs font-medium text-rose-800">
+                        เปิด FPV-Car-Setup เพื่อตั้งค่าให้ทั้งสองบอร์ดใหม่พร้อมกัน
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
               <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sky-950">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
@@ -343,10 +402,10 @@ export default function SettingsPanel({
               >
                 <div className="mb-1 flex items-center gap-2">
                   <Wifi size={17} className="text-emerald-700" />
-                  <h3 className="text-sm font-semibold text-neutral-800">เปลี่ยน Wi-Fi ของรถ</h3>
+                  <h3 className="text-sm font-semibold text-neutral-800">เปลี่ยน Wi-Fi ของรถและกล้อง</h3>
                 </div>
                 <p className="mb-3 text-xs leading-5 text-slate-500">
-                  ESP32 จะสแกนเครือข่ายที่อยู่ใกล้รถ เลือกชื่อจากรายการแล้วใส่รหัสผ่านเพียงครั้งเดียว
+                  ESP32 จะสแกนเครือข่ายใกล้รถ แล้วส่งค่าที่เลือกให้ ESP32-CAM ผ่าน Cloud โดยอัตโนมัติ
                 </p>
 
                 <div className="space-y-3">
@@ -494,7 +553,7 @@ export default function SettingsPanel({
                   ) : null}
 
                   <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-950">
-                    รถและกล้องจะขาดการเชื่อมต่อชั่วคราว แล้วเชื่อม Wi-Fi ใหม่นี้พร้อมกัน
+                    ต้องให้ทั้ง ESP32 และ ESP32-CAM ออนไลน์ก่อน ทั้งสองบอร์ดจะหยุดเชื่อมต่อชั่วคราวประมาณ 5-20 วินาที
                   </div>
 
                   <button
@@ -506,6 +565,8 @@ export default function SettingsPanel({
                       ? "กำลังส่งค่า..."
                       : !vehicleOnline
                       ? "รอ ESP32 ออนไลน์"
+                      : !cameraOnline
+                      ? "รอ ESP32-CAM ออนไลน์"
                       : selectedNetwork
                       ? `ใช้ ${selectedNetwork.ssid} กับรถและกล้อง`
                       : "เลือก Wi-Fi ก่อน"}

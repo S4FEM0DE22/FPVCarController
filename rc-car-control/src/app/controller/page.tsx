@@ -430,6 +430,10 @@ export default function ControllerPage() {
         onChangeWifi={handleSharedWifiChange}
         vehicleOnline={telemetry.online}
         cameraOnline={cameraOnline}
+        vehicleWifiSsid={telemetry.wifiSsid}
+        vehicleWifiGateway={telemetry.wifiGateway}
+        cameraWifiSsid={cameraStreamStatus?.wifiSsid}
+        cameraWifiGateway={cameraStreamStatus?.wifiGateway}
         cameraStreamProfile={cameraStreamStatus?.profile ?? "balanced"}
         onChangeCameraStreamProfile={async (profile) => {
           handleSystemAction("CAMERA_STREAM_PROFILE", { profile });

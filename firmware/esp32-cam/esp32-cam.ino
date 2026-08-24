@@ -30,6 +30,10 @@
 #define PCLK_GPIO_NUM 22
 #define FLASH_LED_PIN 4
 
+static const char *SETUP_AP_SSID = "FPV-Car-Setup";
+static const char *SYNC_AP_SSID = "FPV-Car-Sync";
+static const char *DEVICE_AP_PASSWORD = "12345678";
+
 struct CamConfig {
   char wifiSsid[64] = "";
   char wifiPass[96] = "";
@@ -56,6 +60,10 @@ bool wsConnected = false;
 bool cloudMotionMode = false;
 bool wifiSwitchPending = false;
 unsigned long wifiSwitchAt = 0;
+bool wifiSwitchInProgress = false;
+unsigned long wifiSwitchStartedAt = 0;
+const unsigned long WIFI_SWITCH_TIMEOUT_MS = 25000;
+const unsigned long BOOT_SYNC_DISCOVERY_MS = 10000;
 unsigned long lastFrameAt = 0;
 unsigned long cloudMotionUntil = 0;
 unsigned long lastStatusAt = 0;
@@ -491,6 +499,8 @@ void sendCameraStreamStatus(float fps) {
   doc["frameBytes"] = lastCloudFrameBytes;
   doc["jpegQuality"] = cloudJpegQuality;
   doc["rssi"] = WiFi.RSSI();
+  doc["wifiSsid"] = WiFi.isConnected() ? WiFi.SSID() : "";
+  doc["wifiGateway"] = WiFi.isConnected() ? WiFi.gatewayIP().toString() : "";
   doc["timeouts"] = cloudFrameAckTimeouts;
   doc["timestamp"] = millis();
 
@@ -941,35 +951,18 @@ bool checkVehicleWiFiMatch() {
 }
 
 bool runBootWiFiSync() {
-  Serial.println("Scanning for vehicle boot sync AP...");
+  Serial.println("Joining hidden vehicle boot sync AP...");
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(false, false);
   delay(200);
-
-  int count = WiFi.scanNetworks(false, true);
-  bool found = false;
-  for (int i = 0; i < count; ++i) {
-    if (WiFi.SSID(i) == "FPV-Car-Setup") {
-      found = true;
-      break;
-    }
-  }
-  WiFi.scanDelete();
-
-  if (!found) {
-    Serial.println("Vehicle boot sync AP not found.");
-    return false;
-  }
-
-  Serial.println("Vehicle boot sync AP found. Joining...");
-  WiFi.begin("FPV-Car-Setup", "12345678");
+  WiFi.begin(SYNC_AP_SSID, DEVICE_AP_PASSWORD);
   unsigned long startedAt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < 15000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < BOOT_SYNC_DISCOVERY_MS) {
     delay(250);
   }
 
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Could not join vehicle boot sync AP.");
+    Serial.println("Hidden vehicle boot sync AP was not available.");
     return false;
   }
 
@@ -1001,7 +994,7 @@ bool waitForVehicleProvision() {
   Serial.println("Connecting to setup AP: FPV-Car-Setup");
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
-  WiFi.begin("FPV-Car-Setup", "12345678");
+  WiFi.begin(SETUP_AP_SSID, DEVICE_AP_PASSWORD);
 
   unsigned long apStartedAt = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - apStartedAt < 30000) {
@@ -1045,11 +1038,19 @@ void setupWiFiManager() {
 
   if (connectToConfiguredWiFi(18000)) return;
 
-  Serial.println("Saved WiFi unavailable. Waiting for vehicle provisioning.");
-  if (waitForVehicleProvision()) {
+  while (true) {
+    Serial.println("Saved WiFi unavailable. Waiting for vehicle provisioning.");
+    if (!waitForVehicleProvision()) {
+      Serial.println("Provisioning unavailable. Restarting camera recovery flow...");
+      delay(1500);
+      ESP.restart();
+    }
+
     WiFi.disconnect(true, false);
     delay(300);
-    connectToConfiguredWiFi(25000);
+    if (connectToConfiguredWiFi(25000)) return;
+
+    Serial.println("Provisioned WiFi failed. Returning to FPV-Car-Setup.");
   }
 }
 
@@ -1078,6 +1079,8 @@ void loop() {
 
   if (wifiSwitchPending && (long)(millis() - wifiSwitchAt) >= 0) {
     wifiSwitchPending = false;
+    wifiSwitchInProgress = true;
+    wifiSwitchStartedAt = millis();
     Serial.println("Switching ESP32-CAM to the newly saved WiFi...");
     WiFi.disconnect(true, true);
     delay(300);
@@ -1088,6 +1091,15 @@ void loop() {
   sendCloudFrame();
 
   unsigned long now = millis();
+  if (wifiSwitchInProgress) {
+    if (WiFi.status() == WL_CONNECTED) {
+      wifiSwitchInProgress = false;
+      Serial.println("ESP32-CAM connected to the new WiFi.");
+    } else if (now - wifiSwitchStartedAt > WIFI_SWITCH_TIMEOUT_MS) {
+      Serial.println("New WiFi failed. Restarting camera recovery flow...");
+      ESP.restart();
+    }
+  }
   if (cloudMotionMode && (long)(now - cloudMotionUntil) >= 0) {
     setCloudMotionMode(false);
   }

@@ -56,6 +56,8 @@ export interface VehicleTelemetry {
   online: boolean;
   battery: number;
   wifi: number;
+  wifiSsid?: string;
+  wifiGateway?: string;
   latency: number;
   cameraOn: boolean;
   driveState: VehicleDriveState;

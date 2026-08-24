@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <DNSServer.h>
 #include <ESP32Servo.h>
 #include <Preferences.h>
 #include <WebServer.h>
@@ -28,6 +29,9 @@ static const int PIN_BUZZER = 4;
 static const int PIN_BATTERY_ADC = 34;
 
 static const int MOTOR_PWM_MAX = 255;
+static const char *SETUP_AP_SSID = "FPV-Car-Setup";
+static const char *SYNC_AP_SSID = "FPV-Car-Sync";
+static const char *DEVICE_AP_PASSWORD = "12345678";
 // Safe limits for small plastic-gear 180-degree servos.
 static const int SERVO_PAN_MIN = 15;
 static const int SERVO_PAN_MAX = 175;
@@ -68,6 +72,7 @@ struct BehaviorProfile {
 Preferences prefs;
 WebSocketsClient webSocket;
 WebServer portalServer(80);
+DNSServer dnsServer;
 Servo panServo;
 Servo tiltServo;
 VehicleConfig config;
@@ -90,7 +95,7 @@ volatile bool camProvisionAcked = false;
 String camProvisionAckMessage = "";
 unsigned long camAckAt = 0;
 const unsigned long CAM_ACK_TIMEOUT_MS = 120000; // wait up to 2 minutes for camera
-const unsigned long BOOT_SYNC_WINDOW_MS = 30000; // camera gets 30 seconds to check/sync on boot
+const unsigned long BOOT_SYNC_WINDOW_MS = 15000;
 bool bootSyncActive = false;
 
 
@@ -99,10 +104,15 @@ bool setupConnectOk = false;
 unsigned long setupSavedAt = 0;
 bool wifiSwitchPending = false;
 unsigned long wifiSwitchAt = 0;
+bool wifiSwitchInProgress = false;
+unsigned long wifiSwitchStartedAt = 0;
+const unsigned long WIFI_SWITCH_TIMEOUT_MS = 25000;
+String setupLastError = "";
 bool wifiScanInProgress = false;
 String wifiScanRequestId = "";
 
 void sendDeviceLog(const char *level, const String &message);
+void handleResetWiFi();
 
 String deviceName() {
   uint64_t chipId = ESP.getEfuseMac();
@@ -362,6 +372,8 @@ void sendTelemetry() {
   doc["online"] = WiFi.isConnected() && wsConnected;
   doc["battery"] = (int)round(readBatteryPercent());
   doc["wifi"] = readWifiRssi();
+  doc["wifiSsid"] = WiFi.isConnected() ? WiFi.SSID() : "";
+  doc["wifiGateway"] = WiFi.isConnected() ? WiFi.gatewayIP().toString() : "";
   doc["latency"] = 0;
   doc["cameraOn"] = cameraOn;
 
@@ -694,16 +706,7 @@ void setupPortalRedirect() {
     portalServer.send(302, "text/plain", "Opening controller...");
   });
 
-  portalServer.on("/reset-wifi", []() {
-    portalServer.send(200, "text/plain", "WiFi settings cleared. Rebooting...");
-    delay(300);
-    prefs.begin("fpv-car", false);
-    prefs.remove("wifiSsid");
-    prefs.remove("wifiPass");
-    prefs.end();
-    WiFi.disconnect(true, true);
-    ESP.restart();
-  });
+  portalServer.on("/reset-wifi", handleResetWiFi);
 
   portalServer.begin();
 }
@@ -720,6 +723,7 @@ bool connectToConfiguredWiFi(unsigned long timeoutMs, bool keepSetupAp) {
 
   unsigned long startedAt = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startedAt < timeoutMs) {
+    if (keepSetupAp) dnsServer.processNextRequest();
     portalServer.handleClient();
     delay(100);
     Serial.print(".");
@@ -752,9 +756,22 @@ String wifiOptionsHtml() {
   int networkCount = WiFi.scanNetworks();
   for (int i = 0; i < networkCount; i++) {
     String ssid = WiFi.SSID(i);
-    html += "<option value=\"" + htmlEscape(ssid.c_str()) + "\">";
-    html += htmlEscape(ssid.c_str());
-    html += " (" + String(WiFi.RSSI(i)) + " dBm)</option>";
+    if (ssid.length() == 0) continue;
+
+    bool duplicate = false;
+    for (int j = 0; j < i; j++) {
+      if (WiFi.SSID(j) == ssid) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (duplicate) continue;
+
+    int rssi = WiFi.RSSI(i);
+    const char *signal = rssi >= -55 ? "แรงมาก" : rssi >= -67 ? "ดี" : rssi >= -75 ? "พอใช้" : "อ่อน";
+    html += "<option value=\"" + htmlEscape(ssid.c_str()) + "\"";
+    if (ssid == String(config.wifiSsid)) html += " selected";
+    html += ">" + htmlEscape(ssid.c_str()) + " · " + signal + " (" + String(rssi) + " dBm)</option>";
   }
   WiFi.scanDelete();
   return html;
@@ -762,35 +779,74 @@ String wifiOptionsHtml() {
 
 void sendSetupPage() {
   String html;
-  html += "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
-  html += "<title>FPV Car Setup</title><style>";
-  html += "body{font-family:system-ui;margin:0;background:#0b1020;color:#eef2ff}main{max-width:720px;margin:auto;padding:24px}";
-  html += "label{display:block;margin:14px 0 6px;color:#b7c4d8}input,select{width:100%;box-sizing:border-box;padding:12px;border-radius:8px;border:1px solid #334155;background:#101827;color:#fff}";
-  html += "button{margin-top:18px;padding:13px 18px;border:0;border-radius:8px;background:#38bdf8;color:#00111f;font-weight:700}";
-  html += ".grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.card{border:1px solid #263449;border-radius:12px;padding:16px;background:#111827}";
-  html += "@media(max-width:640px){.grid{grid-template-columns:1fr}}</style></head><body><main>";
-  html += "<h1>FPV Car Setup</h1><p>Set Wi-Fi once. The vehicle will share it with ESP32-CAM automatically.</p>";
-  html += "<form method='post' action='/save'><div class='card'>";
-  html += "<label>Choose Wi-Fi / Hotspot</label><select name='ssid_select'><option value=''>Manual SSID</option>";
+  html.reserve(9000);
+  html += "<!doctype html><html lang='th'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<title>ตั้งค่า FPV Car</title><style>";
+  html += "*{box-sizing:border-box}body{font-family:system-ui,sans-serif;margin:0;background:#eef2f3;color:#172033}header{background:#111827;color:white;padding:22px 20px}header div,main{max-width:680px;margin:auto}h1{font-size:23px;margin:0 0 6px}h2{font-size:16px;margin:0 0 5px}p{margin:0;line-height:1.55}.sub{color:#cbd5e1;font-size:13px}main{padding:18px 14px 36px}.status{border-left:4px solid #10b981;background:#ecfdf5;padding:12px 14px;margin-bottom:14px;border-radius:6px}.section{background:white;border:1px solid #d8e0e5;border-radius:8px;padding:16px;margin-bottom:12px}.title{display:flex;gap:10px;align-items:flex-start}.num{display:grid;place-items:center;flex:0 0 26px;height:26px;border-radius:50%;background:#172033;color:white;font-weight:700;font-size:13px}.hint{color:#64748b;font-size:12px}label{display:block;margin:14px 0 6px;font-size:13px;font-weight:650}input,select{width:100%;padding:12px;border-radius:6px;border:1px solid #cbd5e1;background:white;color:#172033;font-size:16px}input:focus,select:focus{outline:2px solid #34d399;border-color:#059669}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}details{margin-top:12px;border-top:1px solid #e2e8f0;padding-top:12px}summary{cursor:pointer;font-size:13px;font-weight:700}.primary{width:100%;border:0;border-radius:7px;padding:14px;background:#059669;color:white;font-size:15px;font-weight:750}.secondary{display:inline-block;margin-top:10px;color:#475569;font-size:12px}.error{border-left-color:#e11d48;background:#fff1f2;color:#9f1239;margin-bottom:14px}.footer{font-size:11px;color:#64748b;text-align:center;margin-top:18px}@media(max-width:560px){header{padding:18px 16px}.grid{grid-template-columns:1fr}.section{padding:14px}}";
+  html += "</style></head><body><header><div><h1>ตั้งค่า FPV Car</h1><p class='sub'>เลือก Wi-Fi ครั้งเดียว ระบบจะส่งค่าให้ ESP32 และ ESP32-CAM พร้อมกัน</p></div></header><main>";
+  html += "<div class='status'><strong>พร้อมตั้งค่า</strong><p class='hint'>เชื่อมต่ออยู่กับ FPV-Car-Setup · เปิดไฟทั้งสองบอร์ดไว้จนกว่าจะเสร็จ</p></div>";
+  if (setupLastError.length() > 0) html += "<div class='status error'><strong>การเชื่อมต่อครั้งก่อนยังไม่สำเร็จ</strong><p class='hint'>" + htmlEscape(setupLastError.c_str()) + "</p></div>";
+  html += "<form method='post' action='/save'><section class='section'><div class='title'><span class='num'>1</span><div><h2>เลือก Wi-Fi หรือ Hotspot</h2><p class='hint'>ใช้เครือข่าย 2.4 GHz ที่รถอยู่ในระยะสัญญาณ</p></div></div>";
+  html += "<label for='ssid_select'>เครือข่ายที่สแกนพบ</label><select id='ssid_select' name='ssid_select' onchange='toggleManual()'><option value=''>ใส่ชื่อเครือข่ายเอง</option>";
   html += wifiOptionsHtml();
-  html += "</select><label>Manual SSID</label><input name='ssid' value='";
+  html += "</select><div id='manual'><label for='ssid'>ชื่อเครือข่าย</label><input id='ssid' name='ssid' autocomplete='off' value='";
   html += htmlEscape(config.wifiSsid);
-  html += "'><label>Password</label><input name='password' type='password' value='";
-  html += htmlEscape(config.wifiPass);
-  html += "'></div><div class='card' style='margin-top:14px'><div class='grid'>";
-  html += "<div><label>WebSocket scheme</label><select name='ws_scheme'><option value='ws'>ws</option><option value='wss'";
+  html += "'></div><label for='password'>รหัสผ่าน Wi-Fi</label><input id='password' name='password' type='password' autocomplete='new-password' placeholder='";
+  html += strlen(config.wifiSsid) > 0 ? "เว้นว่างเพื่อใช้รหัสเดิม" : "ใส่รหัสผ่านของเครือข่าย";
+  html += "'><p class='hint' style='margin-top:6px'>หากเลือก Wi-Fi เดิม สามารถเว้นว่างเพื่อใช้รหัสที่บันทึกไว้</p></section>";
+  html += "<section class='section'><div class='title'><span class='num'>2</span><div><h2>ตรวจสอบ Cloud</h2><p class='hint'>ค่าเดิมพร้อมใช้งานแล้ว เปิดส่วนนี้เมื่อต้องเปลี่ยนเซิร์ฟเวอร์เท่านั้น</p></div></div><details><summary>การตั้งค่าขั้นสูง</summary><div class='grid'>";
+  html += "<div><label>รูปแบบ WebSocket</label><select name='ws_scheme'><option value='ws'>ws</option><option value='wss'";
   html += strcmp(config.wsScheme, "wss") == 0 ? " selected" : "";
   html += ">wss</option></select></div>";
-  html += "<div><label>WebSocket host</label><input name='ws_host' value='" + htmlEscape(config.wsHost) + "'></div>";
-  html += "<div><label>WebSocket port</label><input name='ws_port' value='" + htmlEscape(config.wsPort) + "'></div>";
-  html += "<div><label>WebSocket path</label><input name='ws_path' value='" + htmlEscape(config.wsPath) + "'></div>";
+  html += "<div><label>Host</label><input name='ws_host' value='" + htmlEscape(config.wsHost) + "'></div>";
+  html += "<div><label>Port</label><input name='ws_port' inputmode='numeric' value='" + htmlEscape(config.wsPort) + "'></div>";
+  html += "<div><label>Path</label><input name='ws_path' value='" + htmlEscape(config.wsPath) + "'></div>";
   html += "<div><label>Vehicle ID</label><input name='vehicle_id' value='" + htmlEscape(config.vehicleId) + "'></div>";
-  html += "<div><label>Vehicle auth token</label><input name='auth_token' value='" + htmlEscape(config.authToken) + "'></div>";
-  html += "</div><label>Controller URL</label><input name='control_url' value='" + htmlEscape(config.controlUrl) + "'></div>";
-  html += "<button type='submit'>Save and connect both boards</button></form>";
-  html += "<p style='margin-top:18px'><a href='/reset-wifi' style='color:#fca5a5'>Clear saved Wi-Fi and restart setup</a></p>";
-  html += "</main></body></html>";
+  html += "<div><label>Auth token</label><input name='auth_token' type='password' placeholder='เว้นว่างเพื่อใช้ค่าเดิม'></div>";
+  html += "</div><label>หน้าเว็บควบคุม</label><input name='control_url' value='" + htmlEscape(config.controlUrl) + "'></details></section>";
+  html += "<section class='section'><div class='title'><span class='num'>3</span><div><h2>บันทึกให้ทั้งสองบอร์ด</h2><p class='hint'>ห้ามปิดไฟจนกว่าหน้าถัดไปจะแจ้งว่า ESP32-CAM รับค่าแล้ว</p></div></div><button class='primary' type='submit'>บันทึกและเชื่อมต่อ</button></section></form>";
+  html += "<a class='secondary' href='/reset-wifi' onclick=\"return confirm('ล้างค่า Wi-Fi ที่บันทึกไว้หรือไม่?')\">ล้างค่า Wi-Fi และเริ่มใหม่</a><p class='footer'>หากหน้านี้ไม่เปิดอัตโนมัติ ให้เข้า 192.168.4.1</p>";
+  html += "</main><script>function toggleManual(){document.getElementById('manual').hidden=document.getElementById('ssid_select').value!==''}toggleManual()</script></body></html>";
   portalServer.send(200, "text/html", html);
+}
+
+void sendSetupStatus() {
+  JsonDocument doc;
+  doc["cameraAcked"] = camProvisionAcked;
+  doc["vehicleConnected"] = WiFi.status() == WL_CONNECTED;
+  doc["ssid"] = config.wifiSsid;
+
+  if (setupConnectDone && setupConnectOk) {
+    doc["phase"] = "connected";
+    doc["message"] = "เชื่อมต่อสำเร็จ กำลังปิดโหมดตั้งค่า";
+  } else if (setupLastError.length() > 0) {
+    doc["phase"] = "error";
+    doc["message"] = setupLastError;
+  } else if (camProvisionAcked) {
+    doc["phase"] = "connecting";
+    doc["message"] = "ESP32-CAM รับค่าแล้ว กำลังเชื่อมต่อ Wi-Fi";
+  } else if (setupProvisionReady) {
+    doc["phase"] = "waiting_camera";
+    doc["message"] = "บันทึกแล้ว กำลังรอ ESP32-CAM รับค่า";
+  } else {
+    doc["phase"] = "idle";
+    doc["message"] = "รอการตั้งค่า";
+  }
+
+  String body;
+  serializeJson(doc, body);
+  portalServer.send(200, "application/json", body);
+}
+
+void handleResetWiFi() {
+  portalServer.send(200, "text/html; charset=utf-8", "<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width'><body style='font-family:system-ui;padding:24px'><h2>ล้างค่าแล้ว</h2><p>กำลังเริ่มโหมดตั้งค่าใหม่...</p></body>");
+  delay(300);
+  prefs.begin("fpv-car", false);
+  prefs.remove("wifiSsid");
+  prefs.remove("wifiPass");
+  prefs.end();
+  WiFi.disconnect(true, true);
+  ESP.restart();
 }
 
 void sendCamProvision() {
@@ -817,20 +873,28 @@ void handleSetupSave() {
   String selectedSsid = portalServer.arg("ssid_select");
   String manualSsid = portalServer.arg("ssid");
   String ssid = selectedSsid.length() > 0 ? selectedSsid : manualSsid;
+  ssid.trim();
 
   if (ssid.length() == 0) {
-    portalServer.send(400, "text/plain", "SSID is required. Go back and choose Wi-Fi.");
+    portalServer.send(400, "text/plain; charset=utf-8", "กรุณาเลือกหรือใส่ชื่อ Wi-Fi");
     return;
   }
 
+  String previousSsid = config.wifiSsid;
+  String password = portalServer.arg("password");
+  String authToken = portalServer.arg("auth_token");
   strlcpy(config.wifiSsid, ssid.c_str(), sizeof(config.wifiSsid));
-  strlcpy(config.wifiPass, portalServer.arg("password").c_str(), sizeof(config.wifiPass));
+  if (password.length() > 0 || ssid != previousSsid) {
+    strlcpy(config.wifiPass, password.c_str(), sizeof(config.wifiPass));
+  }
   strlcpy(config.wsScheme, portalServer.arg("ws_scheme").c_str(), sizeof(config.wsScheme));
   strlcpy(config.wsHost, portalServer.arg("ws_host").c_str(), sizeof(config.wsHost));
   strlcpy(config.wsPort, portalServer.arg("ws_port").c_str(), sizeof(config.wsPort));
   strlcpy(config.wsPath, portalServer.arg("ws_path").c_str(), sizeof(config.wsPath));
   strlcpy(config.vehicleId, portalServer.arg("vehicle_id").c_str(), sizeof(config.vehicleId));
-  strlcpy(config.authToken, portalServer.arg("auth_token").c_str(), sizeof(config.authToken));
+  if (authToken.length() > 0) {
+    strlcpy(config.authToken, authToken.c_str(), sizeof(config.authToken));
+  }
   strlcpy(config.controlUrl, portalServer.arg("control_url").c_str(), sizeof(config.controlUrl));
   saveConfig();
 
@@ -840,16 +904,14 @@ void handleSetupSave() {
   setupSaveRequested = true;
   setupProvisionReady = true;
   setupSavedAt = millis();
+  setupLastError = "";
   Serial.println("Setup saved. Provision payload is ready for ESP32-CAM.");
 
-  portalServer.send(200, "text/html",
-                    "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'>"
-                    "<meta http-equiv='refresh' content='3;url=/'>"
-                    "<body style='font-family:system-ui;background:#0b1020;color:#eef2ff;padding:24px'>"
-                    "<h1>Settings saved</h1>"
-                    "<p>The car is testing the new Wi-Fi now.</p>"
-                    "<p>If the password is wrong or the Wi-Fi cannot be reached, the setup page will stay available.</p>"
-                    "<p>Returning to setup page...</p></body>");
+  portalServer.send(200, "text/html; charset=utf-8",
+                    "<!doctype html><html lang='th'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    "<title>กำลังเชื่อมต่อ</title><style>body{font-family:system-ui;margin:0;background:#eef2f3;color:#172033}main{max-width:560px;margin:0 auto;padding:34px 18px}.box{background:white;border:1px solid #d8e0e5;border-radius:8px;padding:22px}.loader{width:28px;height:28px;border:4px solid #d1fae5;border-top-color:#059669;border-radius:50%;animation:r 1s linear infinite}@keyframes r{to{transform:rotate(360deg)}}h1{font-size:21px}p{line-height:1.6;color:#475569}.state{margin-top:18px;padding:12px;background:#f1f5f9;border-radius:6px;font-weight:650}.back{display:inline-block;margin-top:16px;color:#047857}</style>"
+                    "<main><div class='box'><div class='loader' id='loader'></div><h1>กำลังตั้งค่าสองบอร์ด</h1><p>เปิดไฟ ESP32 และ ESP32-CAM ไว้ ระบบกำลังส่งและตรวจสอบค่า Wi-Fi</p><div class='state' id='state'>กำลังรอ ESP32-CAM...</div><a class='back' href='/'>กลับไปแก้ไขค่า</a></div></main>"
+                    "<script>async function check(){try{const r=await fetch('/api/setup-status',{cache:'no-store'});const s=await r.json();document.getElementById('state').textContent=s.message;if(s.phase==='connected'){document.getElementById('loader').style.display='none';return}}catch(e){document.getElementById('state').textContent='การเชื่อมต่อกับ FPV-Car-Setup สิ้นสุดแล้ว ลองเปิดหน้าเว็บควบคุม'}setTimeout(check,1000)}check()</script></html>");
 }
 
 
@@ -910,20 +972,28 @@ void startSetupPortal() {
   camAckAt = 0;
 
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP("FPV-Car-Setup", "12345678");
+  WiFi.softAP(SETUP_AP_SSID, DEVICE_AP_PASSWORD);
+  dnsServer.start(53, "*", WiFi.softAPIP());
   Serial.print("Setup AP started: FPV-Car-Setup IP=");
   Serial.println(WiFi.softAPIP());
 
   portalServer.stop();
   portalServer.on("/", HTTP_GET, sendSetupPage);
   portalServer.on("/save", HTTP_POST, handleSetupSave);
+  portalServer.on("/api/setup-status", HTTP_GET, sendSetupStatus);
   portalServer.on("/api/cam-provision", HTTP_GET, sendCamProvision);
   portalServer.on("/api/wifi-check", HTTP_GET, sendCamWifiCheck);
   portalServer.on("/api/cam-ack", HTTP_POST, handleCamAck);
+  portalServer.on("/reset-wifi", HTTP_GET, handleResetWiFi);
+  portalServer.onNotFound([]() {
+    portalServer.sendHeader("Location", "http://192.168.4.1/", true);
+    portalServer.send(302, "text/plain", "Opening FPV Car setup...");
+  });
   portalServer.begin();
 
   Serial.println("Open http://192.168.4.1 to configure Wi-Fi for both boards.");
   while (true) {
+    dnsServer.processNextRequest();
     portalServer.handleClient();
 
     // Do NOT switch the vehicle yet. Keep the setup AP alive so the camera can
@@ -944,6 +1014,7 @@ void startSetupPortal() {
 
       if (!setupConnectOk) {
         Serial.println("Vehicle Wi-Fi failed. Keeping setup portal open for correction.");
+        setupLastError = "เชื่อมต่อ Wi-Fi ไม่สำเร็จ กรุณาตรวจชื่อเครือข่ายและรหัสผ่าน";
         setupConnectDone = false;
         camProvisionAcked = false; // require a fresh camera ACK after another save
         WiFi.disconnect(false, false);
@@ -957,8 +1028,15 @@ void startSetupPortal() {
 
     delay(10);
   }
+  dnsServer.stop();
   portalServer.stop();
   WiFi.softAPdisconnect(true);
+
+  if (setupConnectOk) {
+    Serial.println("Shared WiFi setup complete. Restarting into normal mode...");
+    delay(500);
+    ESP.restart();
+  }
 }
 
 void setupWiFiManager() {
@@ -968,8 +1046,8 @@ void setupWiFiManager() {
   setupProvisionReady = strlen(config.wifiSsid) > 0;
   camProvisionAcked = false;
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP("FPV-Car-Setup", "12345678");
-  Serial.println("Boot Wi-Fi sync AP started for ESP32-CAM.");
+  WiFi.softAP(SYNC_AP_SSID, DEVICE_AP_PASSWORD, 1, true);
+  Serial.println("Hidden boot Wi-Fi sync AP started for ESP32-CAM.");
 
   portalServer.stop();
   portalServer.on("/api/cam-provision", HTTP_GET, sendCamProvision);
@@ -1092,6 +1170,8 @@ void loop() {
 
   if (wifiSwitchPending && (long)(millis() - wifiSwitchAt) >= 0) {
     wifiSwitchPending = false;
+    wifiSwitchInProgress = true;
+    wifiSwitchStartedAt = millis();
     Serial.println("Switching ESP32 vehicle to the newly saved WiFi...");
     WiFi.disconnect(true, true);
     delay(300);
@@ -1100,6 +1180,15 @@ void loop() {
   }
 
   unsigned long now = millis();
+  if (wifiSwitchInProgress) {
+    if (WiFi.status() == WL_CONNECTED) {
+      wifiSwitchInProgress = false;
+      Serial.println("ESP32 vehicle connected to the new WiFi.");
+    } else if (now - wifiSwitchStartedAt > WIFI_SWITCH_TIMEOUT_MS) {
+      Serial.println("New WiFi failed. Restarting into shared recovery setup...");
+      ESP.restart();
+    }
+  }
   if (buzzerOffAt > 0 && now >= buzzerOffAt) {
     digitalWrite(PIN_BUZZER, LOW);
     buzzerOffAt = 0;
