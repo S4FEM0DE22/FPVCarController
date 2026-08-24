@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 
 import VideoStream from "@/components/controller/VideoStream";
+import { useCameraFrameAvailable } from "@/lib/cameraFrameStore";
 import {
   driveStateLabel,
   formatCameraAim,
@@ -22,7 +23,6 @@ interface CameraPanelProps {
   isMobile: boolean;
   cameraEnabled?: boolean;
   streamUrl?: string;
-  frameSrc?: string;
   lastCommand?: string;
   lastAction?: string;
   actionPressed?: boolean;
@@ -77,7 +77,6 @@ export default function CameraPanel({
   isMobile,
   cameraEnabled = true,
   streamUrl = "",
-  frameSrc = "",
   lastCommand = "STOP",
   cameraPan = 95,
   cameraTilt = 64,
@@ -100,16 +99,17 @@ export default function CameraPanel({
   inputModeLabel = "CONTROL",
   controlGuideItems = [],
 }: CameraPanelProps) {
+  const frameAvailable = useCameraFrameAvailable();
   const [statusByUrl, setStatusByUrl] = useState<Record<string, StreamStatus>>({});
   const [showGuide, setShowGuide] = useState(false);
   const [pressedQuickAction, setPressedQuickAction] = useState<"horn" | "cameraReset" | null>(null);
   const activeQuickAction = pressedQuickAction ?? externalPressedQuickAction;
   const isHttpStreamUrl = /^https?:\/\//i.test(streamUrl);
   const effectiveStreamUrl = cameraEnabled && isHttpStreamUrl ? streamUrl : "";
-  const effectiveFrameSrc = cameraEnabled && frameSrc ? frameSrc : "";
+  const effectiveFrameAvailable = cameraEnabled && frameAvailable;
   const streamStatus: StreamStatus = !cameraEnabled
     ? "camera-off"
-    : effectiveFrameSrc
+    : effectiveFrameAvailable
     ? "live"
     : !streamUrl
     ? "no-url"
@@ -138,10 +138,9 @@ export default function CameraPanel({
       }`}
       aria-label="ภาพจากกล้องและคำสั่งด่วน"
     >
-      {(effectiveFrameSrc || effectiveStreamUrl) && (
+      {(effectiveFrameAvailable || effectiveStreamUrl) && (
         <VideoStream
           streamUrl={effectiveStreamUrl}
-          frameSrc={effectiveFrameSrc}
           cameraOn={cameraEnabled}
           className="absolute inset-0 h-full w-full object-cover"
           onStreamLoad={() => markStream("live")}

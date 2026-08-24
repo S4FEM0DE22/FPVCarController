@@ -302,7 +302,7 @@ function safeSendBinary(ws, payload) {
 
   try {
     if (ws.meta) ws.meta.cameraFrameSending = true;
-    ws.send(payload, { binary: true }, () => {
+    ws.send(payload, { binary: true, compress: false }, () => {
       if (ws.meta) ws.meta.cameraFrameSending = false;
     });
     return true;
@@ -621,7 +621,7 @@ wss.on("connection", (ws, request) => {
       ws.meta.lastCameraFrameAt = now;
 
       const entry = getVehicleEntry(vehicleId);
-      const frame = Buffer.from(raw);
+      const frame = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
       entry.lastCameraFrame = frame;
       entry.lastCameraFrameId = frameId;
       entry.lastCameraFrameAt = now;
@@ -642,16 +642,16 @@ wss.on("connection", (ws, request) => {
         const pending = entry.pendingCameraFrameAcks.get(frameId);
         if (!pending) return;
         entry.pendingCameraFrameAcks.delete(frameId);
-        safeSend(pending.camera, {
-          type: "camera_frame_ack",
-          frameId,
-          accepted: false,
-          reason: "render_timeout",
-          timestamp: Date.now(),
-        });
       }, CAMERA_RENDER_ACK_TIMEOUT_MS);
       timeoutId.unref?.();
-      entry.pendingCameraFrameAcks.set(frameId, { camera: ws, timeoutId });
+      entry.pendingCameraFrameAcks.set(frameId, { timeoutId });
+      safeSend(ws, {
+        type: "camera_frame_ack",
+        frameId,
+        accepted: true,
+        reason: "forwarded_to_controller",
+        timestamp: now,
+      });
       return;
     }
 
@@ -693,22 +693,8 @@ wss.on("connection", (ws, request) => {
       const pending = entry.pendingCameraFrameAcks.get(frameId);
       if (!pending) return;
 
-      if (data.displayed === false) {
-        const anotherControllerIsRendering = [...entry.controllers].some(
-          (controller) => controller.meta?.cameraFrameAwaitingAck === frameId
-        );
-        if (anotherControllerIsRendering) return;
-      }
-
       clearTimeout(pending.timeoutId);
       entry.pendingCameraFrameAcks.delete(frameId);
-      safeSend(pending.camera, {
-        type: "camera_frame_ack",
-        frameId,
-        accepted: data.displayed !== false,
-        reason: data.displayed === false ? "decode_failed" : undefined,
-        timestamp: Date.now(),
-      });
       return;
     }
 

@@ -79,10 +79,10 @@ The web app stores this camera URL in `localStorage`, so it keeps working after 
 The Vehicle tab in Settings provides three persistent cloud stream profiles:
 
 - `realtime`: QVGA (`320x240`) with a 75 ms frame interval for driving.
-- `balanced`: HVGA (`480x320`) while idle and QVGA while the camera moves.
+- `balanced`: constant CIF (`400x296`) to avoid sensor reconfiguration while the camera moves.
 - `quality`: VGA (`640x480`) while idle and CIF (`400x296`) while the camera moves.
 
-The camera returns to its idle resolution about `1200 ms` after movement stops, avoiding repeated sensor reconfiguration during intermittent pan/tilt input. The realtime profile skips sensor reconfiguration entirely because its idle and motion resolutions are both QVGA. JPEG compression adapts independently inside each profile from frame size and end-to-end display acknowledgement latency. Only one JPEG may be in flight: the relay numbers it, the browser acknowledges it after decoding, and the camera captures the next frame only after that acknowledgement. This deliberately reduces FPS on a slow link instead of building an ordered TCP queue of old pictures. The ESP32-CAM saves the selected profile in Preferences and reports FPS, frame RTT, frame size, RSSI, and timeout counters to Controller Insights. Without PSRAM it falls back to QVGA.
+The camera returns to its idle resolution about `1200 ms` after movement stops. The realtime and balanced profiles keep one resolution in both modes, avoiding a sensor pause during pan/tilt. With PSRAM, JPEG capture uses two frame buffers in continuous `CAMERA_GRAB_LATEST` mode. Realtime and balanced allow at most two cloud frames in flight to cover one network round trip; quality allows one. The relay acknowledges as soon as it forwards a frame to a ready controller, while the browser display acknowledgement independently prevents a slow phone or tablet from accumulating old frames. Excess frames are dropped instead of queued. The ESP32-CAM saves the selected profile in Preferences and reports FPS, frame RTT, frame size, RSSI, and timeout counters to Controller Insights. Without PSRAM it falls back to a single QVGA buffer.
 
 Deploy the updated relay and web app before flashing this ESP32-CAM firmware. The new firmware expects frame acknowledgements from the relay. The relay remains compatible with the older JSON/Base64 camera frame format during migration.
 

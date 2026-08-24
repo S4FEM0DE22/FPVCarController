@@ -83,6 +83,7 @@ uint8_t cloudJpegQuality = 17;
 uint8_t stableCloudFrameCount = 0;
 unsigned long cloudFrameIntervalMs = 90;
 unsigned long cloudFrameAckTimeoutMs = 1000;
+uint8_t cloudMaxFramesInFlight = 2;
 uint8_t cloudJpegQualityMin = 15;
 uint8_t cloudJpegQualityMax = 26;
 size_t cloudFrameTargetBytes = 32000;
@@ -191,7 +192,7 @@ framesize_t cloudIdleFrameSize() {
   if (strcmp(config.streamProfile, "quality") == 0) {
     return FRAMESIZE_VGA;
   }
-  return FRAMESIZE_HVGA;
+  return FRAMESIZE_CIF;
 }
 
 framesize_t cloudMotionFrameSize() {
@@ -201,7 +202,7 @@ framesize_t cloudMotionFrameSize() {
   if (strcmp(config.streamProfile, "quality") == 0) {
     return FRAMESIZE_CIF;
   }
-  return FRAMESIZE_QVGA;
+  return FRAMESIZE_CIF;
 }
 
 void applyCloudStreamProfile(const char *profile, bool persist) {
@@ -211,27 +212,30 @@ void applyCloudStreamProfile(const char *profile, bool persist) {
   if (strcmp(nextProfile, "realtime") == 0) {
     cloudFrameIntervalMs = 75;
     cloudFrameAckTimeoutMs = 1500;
-    cloudJpegQualityMin = 20;
-    cloudJpegQualityMax = 30;
+    cloudJpegQualityMin = 16;
+    cloudJpegQualityMax = 24;
     cloudFrameTargetBytes = 22000;
     cloudFrameTargetAckMs = 220;
-    cloudJpegQuality = max<uint8_t>(22, cloudJpegQuality);
+    cloudJpegQuality = min<uint8_t>(24, max<uint8_t>(18, cloudJpegQuality));
+    cloudMaxFramesInFlight = 2;
   } else if (strcmp(nextProfile, "quality") == 0) {
     cloudFrameIntervalMs = 140;
     cloudFrameAckTimeoutMs = 2500;
-    cloudJpegQualityMin = 13;
-    cloudJpegQualityMax = 22;
+    cloudJpegQualityMin = 10;
+    cloudJpegQualityMax = 20;
     cloudFrameTargetBytes = 50000;
     cloudFrameTargetAckMs = 420;
-    cloudJpegQuality = min<uint8_t>(18, cloudJpegQuality);
+    cloudJpegQuality = min<uint8_t>(18, max<uint8_t>(12, cloudJpegQuality));
+    cloudMaxFramesInFlight = 1;
   } else {
     cloudFrameIntervalMs = 90;
     cloudFrameAckTimeoutMs = 1800;
-    cloudJpegQualityMin = 15;
-    cloudJpegQualityMax = 26;
-    cloudFrameTargetBytes = 32000;
+    cloudJpegQualityMin = 12;
+    cloudJpegQualityMax = 22;
+    cloudFrameTargetBytes = 28000;
     cloudFrameTargetAckMs = 300;
-    cloudJpegQuality = min<uint8_t>(24, max<uint8_t>(17, cloudJpegQuality));
+    cloudJpegQuality = min<uint8_t>(20, max<uint8_t>(15, cloudJpegQuality));
+    cloudMaxFramesInFlight = 2;
   }
 
   stableCloudFrameCount = 0;
@@ -266,7 +270,7 @@ String controlUrlWithCamera() {
 }
 
 bool setupCamera() {
-  camera_config_t cam;
+  camera_config_t cam = {};
   cam.ledc_channel = LEDC_CHANNEL_0;
   cam.ledc_timer = LEDC_TIMER_0;
   cam.pin_d0 = Y2_GPIO_NUM;
@@ -297,11 +301,14 @@ bool setupCamera() {
     cam.frame_size = cloudIdleFrameSize();
     cam.jpeg_quality = cloudJpegQuality;
     cam.fb_count = 2;
+    cam.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
     Serial.println("PSRAM not found. Using QVGA low-latency stream.");
+    cloudMaxFramesInFlight = 1;
     cam.frame_size = FRAMESIZE_QVGA;
     cam.jpeg_quality = 16;
     cam.fb_count = 1;
+    cam.fb_location = CAMERA_FB_IN_DRAM;
   }
 
   esp_err_t err = esp_camera_init(&cam);
@@ -533,11 +540,6 @@ void setCloudMotionMode(bool active) {
     cameraSensor->set_framesize(cameraSensor, nextFrameSize);
   }
 
-  if (cloudMotionMode && cloudJpegQuality < cloudJpegQualityMin + 3) {
-    cloudJpegQuality = min<uint8_t>(cloudJpegQualityMax, cloudJpegQualityMin + 3);
-    cameraSensor->set_quality(cameraSensor, cloudJpegQuality);
-  }
-
   Serial.printf(
     "Camera %s mode (%s profile)\n",
     cloudMotionMode ? "motion" : "idle",
@@ -559,7 +561,7 @@ void tuneCloudJpegQuality() {
   if (overloaded) {
     stableCloudFrameCount = 0;
     nextQuality = min<uint8_t>(cloudJpegQualityMax, cloudJpegQuality + 2);
-  } else if (stable && !cloudMotionMode) {
+  } else if (stable) {
     stableCloudFrameCount++;
     if (stableCloudFrameCount >= 8 && cloudJpegQuality > cloudJpegQualityMin) {
       stableCloudFrameCount = 0;
@@ -581,11 +583,12 @@ void clearPendingCloudFrameAcks() {
   memset(pendingCloudFrameSentAt, 0, sizeof(pendingCloudFrameSentAt));
 }
 
-bool hasPendingCloudFrameAcks() {
+uint8_t pendingCloudFrameAckCount() {
+  uint8_t count = 0;
   for (uint8_t index = 0; index < CLOUD_PENDING_FRAME_SLOTS; index++) {
-    if (pendingCloudFrameIds[index] != 0) return true;
+    if (pendingCloudFrameIds[index] != 0) count++;
   }
-  return false;
+  return count;
 }
 
 void expirePendingCloudFrameAcks(unsigned long now) {
@@ -629,9 +632,9 @@ void sendCloudFrame() {
 
   const unsigned long now = millis();
   expirePendingCloudFrameAcks(now);
-  // Keep at most one JPEG in flight. WebSocket/TCP is ordered, so allowing
-  // several unacknowledged frames only makes an old-picture queue.
-  if (hasPendingCloudFrameAcks()) return;
+  // A two-frame pipeline can cover one cloud RTT without allowing an
+  // unbounded ordered TCP queue. The quality profile stays at one frame.
+  if (pendingCloudFrameAckCount() >= cloudMaxFramesInFlight) return;
   if (now - lastFrameAt < cloudFrameIntervalMs) return;
   lastFrameAt = now;
 
@@ -1117,12 +1120,13 @@ void loop() {
     cloudFramesAtLastStatus = cloudFramesSent;
     if (wsConnected) {
       Serial.printf(
-        "Camera cloud online | sent=%lu ack=%lu staleAck=%lu timeout=%lu pending=%s profile=%s mode=%s FPS=%.1f RTT=%lu ms bytes=%u Q=%u RSSI=%d dBm\n",
+        "Camera cloud online | sent=%lu ack=%lu staleAck=%lu timeout=%lu pending=%u/%u profile=%s mode=%s FPS=%.1f RTT=%lu ms bytes=%u Q=%u RSSI=%d dBm\n",
         (unsigned long)cloudFramesSent,
         (unsigned long)cloudFrameAcks,
         (unsigned long)cloudStaleFrameAcks,
         (unsigned long)cloudFrameAckTimeouts,
-        hasPendingCloudFrameAcks() ? "yes" : "no",
+        pendingCloudFrameAckCount(),
+        cloudMaxFramesInFlight,
         config.streamProfile,
         cloudMotionMode ? "motion" : "idle",
         cloudFps,

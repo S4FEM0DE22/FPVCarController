@@ -10,6 +10,7 @@ import {
 import { getVehicleStateAfterStatus } from "@/lib/vehicleStateMachine";
 import useVehicleSocket from "@/hooks/useVehicleSocket";
 import { VEHICLE_CONFIG } from "@/constants/network";
+import { setCameraFrameSource } from "@/lib/cameraFrameStore";
 import type {
   ActionCommand,
   ControlCommand,
@@ -103,7 +104,6 @@ export default function useVehicleController() {
       tilt: CAMERA_TILT_CENTER,
   });
   const [telemetry, setTelemetry] = useState<VehicleTelemetry>(initialTelemetry);
-  const [cameraFrameSrc, setCameraFrameSrc] = useState("");
   const [cameraOnline, setCameraOnline] = useState(false);
   const [cameraStreamStatus, setCameraStreamStatus] =
     useState<CameraStreamStatusMessage | null>(null);
@@ -127,7 +127,7 @@ export default function useVehicleController() {
   const replaceCameraFrame = useCallback((nextSrc: string) => {
     const previousSrc = cameraFrameUrlRef.current;
     cameraFrameUrlRef.current = nextSrc;
-    setCameraFrameSrc(nextSrc);
+    setCameraFrameSource(nextSrc);
 
     if (previousSrc.startsWith("blob:")) {
       window.setTimeout(() => URL.revokeObjectURL(previousSrc), 1000);
@@ -198,6 +198,7 @@ export default function useVehicleController() {
     return () => {
       cameraFrameDisposedRef.current = true;
       pendingCameraFrameRef.current = null;
+      setCameraFrameSource("");
       const decoder = cameraDecoderRef.current;
       if (decoder) {
         decoder.onload = null;
@@ -610,7 +611,6 @@ export default function useVehicleController() {
     lastAction,
     lastActionAt,
     cameraOrientation,
-    cameraFrameSrc,
     cameraOnline,
     cameraStreamStatus,
     connectionState,

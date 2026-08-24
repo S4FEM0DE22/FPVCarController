@@ -1,6 +1,9 @@
+"use client";
+
+import { useCameraFrameSource } from "@/lib/cameraFrameStore";
+
 interface VideoStreamProps {
   streamUrl?: string;
-  frameSrc?: string;
   cameraOn: boolean;
   className?: string;
   onStreamLoad?: () => void;
@@ -9,12 +12,12 @@ interface VideoStreamProps {
 
 export default function VideoStream({
   streamUrl = "",
-  frameSrc = "",
   cameraOn,
   className,
   onStreamLoad,
   onStreamError,
 }: VideoStreamProps) {
+  const frameSrc = useCameraFrameSource();
   const isHttpStreamUrl = /^https?:\/\//i.test(streamUrl);
   const effectiveStreamUrl = cameraOn && isHttpStreamUrl ? streamUrl : "";
   const effectiveFrameSrc = cameraOn && frameSrc ? frameSrc : "";

@@ -359,12 +359,14 @@ test("binary camera frames relay without base64 encoding", async () => {
 
     const metadata = await frameMeta;
     assert.deepEqual(await receivedFrame, jpegFrame);
+    const ack = await frameAck;
+    assert.equal(ack.accepted, true);
+    assert.equal(ack.reason, "forwarded_to_controller");
     sendJson(controller, {
       type: "camera_frame_rendered",
       frameId: metadata.frameId,
       displayed: true,
     });
-    assert.equal((await frameAck).accepted, true);
   } finally {
     camera.close();
     controller.close();

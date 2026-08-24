@@ -72,7 +72,6 @@ export default function ControllerPage() {
     handleSystemAction,
     handleEmergencyStop,
     cameraOrientation,
-    cameraFrameSrc,
     cameraOnline,
     cameraStreamStatus,
     deviceLogs,
@@ -235,7 +234,6 @@ export default function ControllerPage() {
           cameraOn={telemetry.cameraOn}
           lightOn={telemetry.lightOn}
           streamUrl={cameraStreamUrl}
-          frameSrc={cameraFrameSrc}
           connectionState={connectionState}
           vehicleOnline={telemetry.online}
           battery={telemetry.battery}
@@ -319,7 +317,6 @@ export default function ControllerPage() {
                   isMobile={isMobile}
                   cameraEnabled={telemetry.cameraOn}
                   streamUrl={cameraStreamUrl}
-                  frameSrc={cameraFrameSrc}
                   lastCommand={lastCommand}
                   lastAction={lastAction}
                   actionPressed={actionPressed}
