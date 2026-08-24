@@ -54,6 +54,8 @@ bool cameraHasPsram = false;
 bool flashOn = false;
 bool wsConnected = false;
 bool cloudMotionMode = false;
+bool wifiSwitchPending = false;
+unsigned long wifiSwitchAt = 0;
 unsigned long lastFrameAt = 0;
 unsigned long cloudMotionUntil = 0;
 unsigned long lastStatusAt = 0;
@@ -376,12 +378,11 @@ void handleWifiSet() {
   Serial.print(" controlUrl=");
   Serial.println(controlUrl.length() > 0 ? controlUrl : config.controlUrl);
 
-  server.send(200, "application/json", "{\"ok\":true,\"message\":\"camera wifi switching\"}");
-  delay(250);
-  WiFi.disconnect(true, true);
-  delay(300);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid.c_str(), password.c_str());
+  // Send ACK first. The actual disconnect happens later in loop(),
+  // giving the car time to receive the HTTP 200 response.
+  server.send(200, "application/json", "{\"ok\":true,\"message\":\"camera wifi update saved\"}");
+  wifiSwitchPending = true;
+  wifiSwitchAt = millis() + 1200;
 }
 
 void handleCapture() {
@@ -708,6 +709,27 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
       applyCloudStreamProfile(profile, true);
       sendDeviceLog("info", String("Camera stream profile changed to ") + profile);
       sendCameraStreamStatus();
+      return;
+    }
+
+    if (strcmp(messageType, "action") == 0) {
+      const char *action = doc["action"] | "";
+      if (strcmp(action, "WIFI_SET") == 0) {
+        JsonObject actionPayload = doc["payload"].as<JsonObject>();
+        const char *ssid = actionPayload["ssid"] | "";
+        const char *password = actionPayload["password"] | "";
+        if (strlen(ssid) == 0) {
+          sendDeviceLog("warn", "Camera rejected WiFi update with empty SSID");
+          return;
+        }
+
+        strlcpy(config.wifiSsid, ssid, sizeof(config.wifiSsid));
+        strlcpy(config.wifiPass, password, sizeof(config.wifiPass));
+        saveConfig();
+        sendDeviceLog("info", "Camera WiFi update saved; reconnecting");
+        wifiSwitchPending = true;
+        wifiSwitchAt = millis() + 1200;
+      }
     }
     return;
   }
@@ -851,6 +873,130 @@ bool fetchProvisionFromVehicle() {
   return applyProvisionPayload(body);
 }
 
+
+
+// Forward declaration: this function is defined later in the sketch.
+bool sendProvisionAckToVehicle(const char *message);
+
+bool checkVehicleWiFiMatch() {
+  HTTPClient http;
+  http.begin("http://192.168.4.1/api/wifi-check");
+  int status = http.GET();
+  if (status != 200) {
+    http.end();
+    return false;
+  }
+
+  String body = http.getString();
+  http.end();
+
+  JsonDocument doc;
+  if (deserializeJson(doc, body) || !(doc["ok"] | false)) return false;
+
+  String vehicleSsid = doc["ssid"] | "";
+  String vehicleFp = doc["fingerprint"] | "";
+  if (!(doc["configured"] | false) || vehicleSsid.length() == 0) {
+    Serial.println("Vehicle has no saved WiFi yet.");
+    return false;
+  }
+
+  // Same FNV-1a algorithm as the vehicle. Password is not sent over the API.
+  uint32_t h = 2166136261UL;
+  String local = String(config.wifiSsid) + "|" + String(config.wifiPass);
+  for (size_t i = 0; i < local.length(); ++i) {
+    h ^= (uint8_t)local[i];
+    h *= 16777619UL;
+  }
+  char localFp[9];
+  snprintf(localFp, sizeof(localFp), "%08lX", (unsigned long)h);
+
+  bool match = (vehicleSsid == String(config.wifiSsid) &&
+                vehicleFp == String(localFp));
+
+  Serial.println(match ? "Boot Wi-Fi check: vehicle and camera match."
+                       : "Boot Wi-Fi check: mismatch detected.");
+
+  if (match) {
+    return sendProvisionAckToVehicle("boot_sync_match");
+  }
+
+  if (!match) {
+    if (!fetchProvisionFromVehicle()) {
+      Serial.println("Could not fetch replacement Wi-Fi provision.");
+      return false;
+    }
+
+    bool acked = sendProvisionAckToVehicle("boot_sync_saved");
+    for (int i = 0; i < 5 && !acked; ++i) {
+      delay(500);
+      acked = sendProvisionAckToVehicle("boot_sync_saved");
+    }
+    if (!acked) {
+      Serial.println("Boot sync saved credentials but vehicle ACK failed.");
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool runBootWiFiSync() {
+  Serial.println("Scanning for vehicle boot sync AP...");
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(false, false);
+  delay(200);
+
+  int count = WiFi.scanNetworks(false, true);
+  bool found = false;
+  for (int i = 0; i < count; ++i) {
+    if (WiFi.SSID(i) == "FPV-Car-Setup") {
+      found = true;
+      break;
+    }
+  }
+  WiFi.scanDelete();
+
+  if (!found) {
+    Serial.println("Vehicle boot sync AP not found.");
+    return false;
+  }
+
+  Serial.println("Vehicle boot sync AP found. Joining...");
+  WiFi.begin("FPV-Car-Setup", "12345678");
+  unsigned long startedAt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < 15000) {
+    delay(250);
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Could not join vehicle boot sync AP.");
+    return false;
+  }
+
+  bool ok = checkVehicleWiFiMatch();
+  WiFi.disconnect(true, false);
+  delay(300);
+  return ok;
+}
+
+bool sendProvisionAckToVehicle(const char *message = "credentials_saved") {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  HTTPClient http;
+  http.begin("http://192.168.4.1/api/cam-ack");
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  int status = http.POST(String("status=saved&message=") + message);
+  http.end();
+
+  if (status == 200) {
+    Serial.println("Vehicle ACK endpoint confirmed. Camera may switch Wi-Fi.");
+    return true;
+  }
+
+  Serial.printf("Vehicle ACK failed, HTTP status=%d\n", status);
+  return false;
+}
+
 bool waitForVehicleProvision() {
   Serial.println("Connecting to setup AP: FPV-Car-Setup");
   WiFi.mode(WIFI_STA);
@@ -872,7 +1018,18 @@ bool waitForVehicleProvision() {
   Serial.println("Joined FPV-Car-Setup. Waiting for vehicle provision...");
   unsigned long provisionStartedAt = millis();
   while (millis() - provisionStartedAt < 240000) {
-    if (fetchProvisionFromVehicle()) return true;
+    if (fetchProvisionFromVehicle()) {
+      // New credentials are saved locally. ACK the vehicle before leaving setup AP.
+      bool acked = sendProvisionAckToVehicle("initial_wifi_saved");
+      if (!acked) {
+        Serial.println("Initial provision saved, but ACK failed. Retrying while still on setup AP.");
+        for (int i = 0; i < 5 && !acked; ++i) {
+          delay(500);
+          acked = sendProvisionAckToVehicle("initial_wifi_saved");
+        }
+      }
+      return acked;
+    }
     delay(1000);
   }
 
@@ -880,20 +1037,19 @@ bool waitForVehicleProvision() {
   return false;
 }
 
+
 void setupWiFiManager() {
+  // Every boot, first check whether the camera and vehicle have the same
+  // saved Wi-Fi configuration.
+  runBootWiFiSync();
+
   if (connectToConfiguredWiFi(18000)) return;
 
-  Serial.println("Saved WiFi unavailable. Waiting for ESP32 vehicle setup.");
-  if (!waitForVehicleProvision()) {
-    Serial.println("Provision failed. Restarting...");
-    delay(1000);
-    ESP.restart();
-  }
-
-  if (!connectToConfiguredWiFi(25000)) {
-    Serial.println("Provisioned WiFi failed. Restarting...");
-    delay(1000);
-    ESP.restart();
+  Serial.println("Saved WiFi unavailable. Waiting for vehicle provisioning.");
+  if (waitForVehicleProvision()) {
+    WiFi.disconnect(true, false);
+    delay(300);
+    connectToConfiguredWiFi(25000);
   }
 }
 
@@ -919,6 +1075,15 @@ void setup() {
 void loop() {
   webSocket.loop();
   server.handleClient();
+
+  if (wifiSwitchPending && (long)(millis() - wifiSwitchAt) >= 0) {
+    wifiSwitchPending = false;
+    Serial.println("Switching ESP32-CAM to the newly saved WiFi...");
+    WiFi.disconnect(true, true);
+    delay(300);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(config.wifiSsid, config.wifiPass);
+  }
 
   sendCloudFrame();
 

@@ -36,6 +36,7 @@ const CAMERA_TILT_CENTER = 64;
 const MAX_DEVICE_LOGS = 120;
 const WIFI_SCAN_TIMEOUT_MS = 20000;
 const CAMERA_CONFIRM_TIMEOUT_MS = 1800;
+const CAMERA_FRESHNESS_TIMEOUT_MS = 12000;
 const CAMERA_POSITION_ACTIONS = new Set<ActionCommand>([
   "CAM_LEFT",
   "CAM_RIGHT",
@@ -116,6 +117,7 @@ export default function useVehicleController() {
   const cameraDecoderRef = useRef<HTMLImageElement | null>(null);
   const cameraDecoderUrlRef = useRef("");
   const cameraFrameDisposedRef = useRef(false);
+  const cameraLastSeenAtRef = useRef(0);
 
   const replaceCameraFrame = useCallback((nextSrc: string) => {
     const previousSrc = cameraFrameUrlRef.current;
@@ -167,6 +169,7 @@ export default function useVehicleController() {
 
   const handleBinaryCameraFrame = useCallback(
     (frame: ArrayBuffer) => {
+      cameraLastSeenAtRef.current = Date.now();
       setCameraOnline(true);
       pendingCameraFrameRef.current = frame;
       decodeLatestCameraFrame();
@@ -259,11 +262,13 @@ export default function useVehicleController() {
     }
 
     if (message.type === "camera_frame") {
+      cameraLastSeenAtRef.current = Date.now();
       setCameraOnline(true);
       replaceCameraFrame(`data:image/${message.format || "jpeg"};base64,${message.data}`);
     }
 
     if (message.type === "camera_status") {
+      cameraLastSeenAtRef.current = message.online ? Date.now() : 0;
       setCameraOnline(message.online);
       if (!message.online) {
         replaceCameraFrame("");
@@ -272,6 +277,7 @@ export default function useVehicleController() {
     }
 
     if (message.type === "camera_stream_status") {
+      cameraLastSeenAtRef.current = Date.now();
       setCameraOnline(true);
       setCameraStreamStatus(message);
     }
@@ -343,6 +349,31 @@ export default function useVehicleController() {
     onMessage: handleSocketMessage,
     onCameraFrame: handleBinaryCameraFrame,
   });
+
+  useEffect(() => {
+    if (connectionState !== "CONNECTED") {
+      cameraLastSeenAtRef.current = 0;
+      setCameraOnline(false);
+      setCameraStreamStatus(null);
+      replaceCameraFrame("");
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      const lastSeenAt = cameraLastSeenAtRef.current;
+      if (
+        lastSeenAt > 0 &&
+        Date.now() - lastSeenAt > CAMERA_FRESHNESS_TIMEOUT_MS
+      ) {
+        cameraLastSeenAtRef.current = 0;
+        setCameraOnline(false);
+        setCameraStreamStatus(null);
+        replaceCameraFrame("");
+      }
+    }, 2000);
+
+    return () => window.clearInterval(timer);
+  }, [connectionState, replaceCameraFrame]);
 
   const handleMove = useCallback(
     (

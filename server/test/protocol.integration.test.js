@@ -47,6 +47,8 @@ function startServer() {
       ALLOW_LOCALHOST_AUTH_BYPASS: "true",
       CONTROL_ACTION_RATE_LIMIT_WINDOW_MS: "5000",
       CONTROL_ACTION_RATE_LIMIT_MAX_MESSAGES: "5",
+      CAMERA_LIVENESS_TIMEOUT_MS: "1500",
+      CAMERA_LIVENESS_CHECK_INTERVAL_MS: "100",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -513,6 +515,60 @@ test("camera stream profile reaches esp-cam without the vehicle ESP", async () =
   }
 });
 
+test("wifi update is forwarded to both vehicle and camera", async () => {
+  const vehicleId = `test-shared-wifi-${Date.now()}`;
+  const url = `ws://127.0.0.1:${serverPort}`;
+  const esp = await connectClient(url);
+  const camera = await connectClient(url);
+  const controller = await connectClient(url);
+
+  try {
+    sendJson(esp, { type: "identify", clientType: "esp", vehicleId });
+    await waitForMessage(esp, (msg) => msg.type === "ack");
+    sendJson(camera, { type: "identify", clientType: "esp-cam", vehicleId });
+    await waitForMessage(camera, (msg) => msg.type === "ack");
+    sendJson(controller, {
+      type: "identify",
+      clientType: "web-controller",
+      vehicleId,
+    });
+    await waitForMessage(controller, (msg) => msg.type === "ack");
+
+    const commandId = `wifi-set-${Date.now()}`;
+    const vehicleUpdate = waitForMessage(
+      esp,
+      (msg) => msg.type === "action" && msg.commandId === commandId
+    );
+    const cameraUpdate = waitForMessage(
+      camera,
+      (msg) => msg.type === "action" && msg.commandId === commandId
+    );
+
+    sendJson(controller, {
+      type: "action",
+      vehicleId,
+      source: "system",
+      action: "WIFI_SET",
+      payload: { ssid: "New Network", password: "new-password" },
+      timestamp: Date.now(),
+      commandId,
+    });
+
+    assert.deepEqual((await vehicleUpdate).payload, {
+      ssid: "New Network",
+      password: "new-password",
+    });
+    assert.deepEqual((await cameraUpdate).payload, {
+      ssid: "New Network",
+      password: "new-password",
+    });
+  } finally {
+    esp.close();
+    camera.close();
+    controller.close();
+  }
+});
+
 test("camera stream status is sanitized and relayed to controllers", async () => {
   const vehicleId = `test-camera-stream-status-${Date.now()}`;
   const url = `ws://127.0.0.1:${serverPort}`;
@@ -553,6 +609,38 @@ test("camera stream status is sanitized and relayed to controllers", async () =>
     assert.equal(status.fps, 12.4);
     assert.equal(status.ackMs, 87);
     assert.equal(status.frameBytes, 18400);
+  } finally {
+    camera.close();
+    controller.close();
+  }
+});
+
+test("camera is marked offline when its connection stops sending data", async () => {
+  const vehicleId = `test-camera-liveness-${Date.now()}`;
+  const url = `ws://127.0.0.1:${serverPort}`;
+  const camera = await connectClient(url);
+  const controller = await connectClient(url);
+
+  try {
+    sendJson(camera, { type: "identify", clientType: "esp-cam", vehicleId });
+    await waitForMessage(camera, (msg) => msg.type === "ack");
+
+    sendJson(controller, {
+      type: "identify",
+      clientType: "web-controller",
+      vehicleId,
+    });
+    await waitForMessage(controller, (msg) => msg.type === "ack");
+
+    const offline = await waitForMessage(
+      controller,
+      (msg) =>
+        msg.type === "camera_status" &&
+        msg.vehicleId === vehicleId &&
+        msg.online === false
+    );
+
+    assert.match(offline.message, /timed out/i);
   } finally {
     camera.close();
     controller.close();

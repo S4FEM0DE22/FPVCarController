@@ -48,6 +48,12 @@ const CAMERA_FRAME_MAX_BYTES = Number(
 const CAMERA_CONTROLLER_MAX_BUFFERED_BYTES = Number(
   process.env.CAMERA_CONTROLLER_MAX_BUFFERED_BYTES || 128000
 );
+const CAMERA_LIVENESS_TIMEOUT_MS = Number(
+  process.env.CAMERA_LIVENESS_TIMEOUT_MS || 10000
+);
+const CAMERA_LIVENESS_CHECK_INTERVAL_MS = Number(
+  process.env.CAMERA_LIVENESS_CHECK_INTERVAL_MS || 2000
+);
 const ALLOW_LOCALHOST_AUTH_BYPASS =
   String(process.env.ALLOW_LOCALHOST_AUTH_BYPASS || "true").toLowerCase() !==
   "false";
@@ -329,30 +335,34 @@ function removeSocketFromRegistry(ws) {
   if (!entry) return;
 
   if (meta.clientType === "esp") {
-    if (entry.esp === ws) {
+    const wasActiveEsp = entry.esp === ws;
+    if (wasActiveEsp) {
       entry.esp = null;
-    }
 
-    broadcastToControllers(meta.vehicleId, {
-      type: "status",
-      vehicleId: meta.vehicleId,
-      state: "offline",
-      message: "ESP disconnected",
-    });
+      broadcastToControllers(meta.vehicleId, {
+        type: "status",
+        vehicleId: meta.vehicleId,
+        state: "offline",
+        message: "ESP disconnected",
+      });
+    }
   }
 
   if (meta.clientType === "esp-cam") {
-    if (entry.camera === ws) {
+    const wasActiveCamera = entry.camera === ws;
+    if (wasActiveCamera) {
       entry.camera = null;
-    }
+      entry.lastCameraFrame = null;
+      entry.lastCameraStreamStatus = null;
 
-    broadcastToControllers(meta.vehicleId, {
-      type: "camera_status",
-      vehicleId: meta.vehicleId,
-      online: false,
-      message: "ESP32-CAM disconnected",
-      timestamp: Date.now(),
-    });
+      broadcastToControllers(meta.vehicleId, {
+        type: "camera_status",
+        vehicleId: meta.vehicleId,
+        online: false,
+        message: meta.cameraDisconnectMessage || "ESP32-CAM disconnected",
+        timestamp: Date.now(),
+      });
+    }
   }
 
   if (meta.clientType === "web-controller") {
@@ -390,6 +400,37 @@ function removeSocketFromRegistry(ws) {
   }
 }
 
+function expireStaleCameraConnections() {
+  const now = Date.now();
+
+  for (const [vehicleId, entry] of vehicleRegistry.entries()) {
+    const camera = entry.camera;
+    if (!camera) continue;
+
+    const lastSeenAt = Number(camera.meta?.lastSeenAt || 0);
+    if (lastSeenAt > 0 && now - lastSeenAt <= CAMERA_LIVENESS_TIMEOUT_MS) {
+      continue;
+    }
+
+    if (camera.meta) {
+      camera.meta.cameraDisconnectMessage = "ESP32-CAM timed out";
+    }
+    logger.warn({
+      event: "camera.liveness_timeout",
+      vehicleId,
+      connectionId: camera.meta?.connectionId || null,
+      lastSeenAgeMs: lastSeenAt > 0 ? now - lastSeenAt : null,
+    });
+    camera.terminate();
+  }
+}
+
+const cameraLivenessTimer = setInterval(
+  expireStaleCameraConnections,
+  CAMERA_LIVENESS_CHECK_INTERVAL_MS
+);
+cameraLivenessTimer.unref();
+
 logger.info({
   event: "server.started",
   port: PORT,
@@ -401,6 +442,8 @@ logger.info({
   cameraFrameMinIntervalMs: CAMERA_FRAME_MIN_INTERVAL_MS,
   cameraFrameMaxBytes: CAMERA_FRAME_MAX_BYTES,
   cameraControllerMaxBufferedBytes: CAMERA_CONTROLLER_MAX_BUFFERED_BYTES,
+  cameraLivenessTimeoutMs: CAMERA_LIVENESS_TIMEOUT_MS,
+  cameraLivenessCheckIntervalMs: CAMERA_LIVENESS_CHECK_INTERVAL_MS,
   controllerAuthEnabled: Boolean(CONTROLLER_AUTH_TOKEN),
   vehicleAuthEnabled: Boolean(VEHICLE_AUTH_TOKEN),
   allowLocalhostAuthBypass: ALLOW_LOCALHOST_AUTH_BYPASS,
@@ -421,6 +464,8 @@ wss.on("connection", (ws, request) => {
     cameraFrameSending: false,
     cameraFrameSequence: 0,
     legacyCameraFrameId: null,
+    lastSeenAt: Date.now(),
+    cameraDisconnectMessage: null,
   };
 
   logger.info({
@@ -431,6 +476,8 @@ wss.on("connection", (ws, request) => {
   });
 
   ws.on("message", (raw, isBinary) => {
+    ws.meta.lastSeenAt = Date.now();
+
     if (isBinary) {
       const vehicleId = ws.meta.vehicleId;
       if (ws.meta.clientType !== "esp-cam" || !vehicleId) {
@@ -590,7 +637,11 @@ wss.on("connection", (ws, request) => {
       const entry = getVehicleEntry(vehicleId);
 
       if (clientType === "esp") {
+        const previousEsp = entry.esp;
         entry.esp = ws;
+        if (previousEsp && previousEsp !== ws) {
+          previousEsp.terminate();
+        }
 
         safeSend(ws, {
           type: "ack",
@@ -611,7 +662,11 @@ wss.on("connection", (ws, request) => {
           });
         }
       } else if (clientType === "esp-cam") {
+        const previousCamera = entry.camera;
         entry.camera = ws;
+        if (previousCamera && previousCamera !== ws) {
+          previousCamera.terminate();
+        }
 
         safeSend(ws, {
           type: "ack",
@@ -641,7 +696,7 @@ wss.on("connection", (ws, request) => {
           safeSend(ws, entry.lastStatus);
         }
 
-        if (entry.lastCameraFrame) {
+        if (entry.camera && entry.lastCameraFrame) {
           if (Buffer.isBuffer(entry.lastCameraFrame)) {
             safeSendBinary(ws, entry.lastCameraFrame);
           } else {
@@ -649,7 +704,7 @@ wss.on("connection", (ws, request) => {
           }
         }
 
-        if (entry.lastCameraStreamStatus) {
+        if (entry.camera && entry.lastCameraStreamStatus) {
           safeSend(ws, entry.lastCameraStreamStatus);
         }
 
@@ -899,6 +954,10 @@ wss.on("connection", (ws, request) => {
         ...data,
         commandId,
       };
+
+      if (data.action === "WIFI_SET" && entry.camera) {
+        safeSend(entry.camera, forwarded);
+      }
 
       if (CAMERA_MOTION_ACTIONS.has(data.action)) {
         safeSend(entry.camera, {

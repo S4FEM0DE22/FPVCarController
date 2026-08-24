@@ -86,9 +86,19 @@ unsigned long buzzerOffAt = 0;
 unsigned long lastWsDisconnectedLogAt = 0;
 bool setupSaveRequested = false;
 bool setupProvisionReady = false;
+volatile bool camProvisionAcked = false;
+String camProvisionAckMessage = "";
+unsigned long camAckAt = 0;
+const unsigned long CAM_ACK_TIMEOUT_MS = 120000; // wait up to 2 minutes for camera
+const unsigned long BOOT_SYNC_WINDOW_MS = 30000; // camera gets 30 seconds to check/sync on boot
+bool bootSyncActive = false;
+
+
 bool setupConnectDone = false;
 bool setupConnectOk = false;
 unsigned long setupSavedAt = 0;
+bool wifiSwitchPending = false;
+unsigned long wifiSwitchAt = 0;
 bool wifiScanInProgress = false;
 String wifiScanRequestId = "";
 
@@ -246,7 +256,7 @@ void applyDrive(float throttle, float steering) {
 
   digitalWrite(PIN_STBY, HIGH);
   setMotorRaw(PIN_AIN1, PIN_AIN2, PIN_PWMA, left);
-  setMotorRaw(PIN_BIN1, PIN_BIN2, PIN_PWMB, right);
+  setMotorRaw(PIN_BIN1, PIN_BIN2, PIN_PWMB, -right);
 }
 
 void stopDrive() {
@@ -257,14 +267,44 @@ void stopDrive() {
 }
 
 float readBatteryPercent() {
-  // Adjust dividerRatio and voltage limits for your Li-ion 3S pack.
   const float adcMax = 4095.0f;
   const float vRef = 3.3f;
-  const float dividerRatio = 5.0f;
-  int raw = analogRead(PIN_BATTERY_ADC);
+
+  // R1 = 47k, R2 = 10k
+  const float dividerRatio = 5.7f;
+
+  const int samples = 30;
+  uint32_t total = 0;
+
+  for (int i = 0; i < samples; i++) {
+    total += analogRead(PIN_BATTERY_ADC);
+    delay(2);
+  }
+
+  float raw = total / (float)samples;
   float voltage = (raw / adcMax) * vRef * dividerRatio;
-  float percent = (voltage - 9.6f) * 100.0f / (12.6f - 9.6f);
+
+  float percent =
+      (voltage - 9.6f) * 100.0f / (12.6f - 9.6f);
+
   return clampFloat(percent, 0, 100);
+}
+
+float readBatteryVoltage() {
+  const float adcMax = 4095.0f;
+  const float vRef = 3.3f;
+  const float dividerRatio = 5.7f;
+
+  const int samples = 30;
+  uint32_t total = 0;
+
+  for (int i = 0; i < samples; i++) {
+    total += analogRead(PIN_BATTERY_ADC);
+    delay(2);
+  }
+
+  float raw = total / (float)samples;
+  return (raw / adcMax) * vRef * dividerRatio;
 }
 
 int readWifiRssi() {
@@ -500,11 +540,8 @@ void changeWiFiFromPayload(JsonObject payload) {
   saveConfig();
   sendStatus("WIFI_SET received: switching vehicle WiFi");
   stopDrive();
-  delay(150);
-  WiFi.disconnect(true, true);
-  delay(300);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid.c_str(), password.c_str());
+  wifiSwitchPending = true;
+  wifiSwitchAt = millis() + 1200;
 }
 
 void handleAction(JsonDocument &doc) {
@@ -750,7 +787,9 @@ void sendSetupPage() {
   html += "<div><label>Vehicle ID</label><input name='vehicle_id' value='" + htmlEscape(config.vehicleId) + "'></div>";
   html += "<div><label>Vehicle auth token</label><input name='auth_token' value='" + htmlEscape(config.authToken) + "'></div>";
   html += "</div><label>Controller URL</label><input name='control_url' value='" + htmlEscape(config.controlUrl) + "'></div>";
-  html += "<button type='submit'>Save and connect both boards</button></form></main></body></html>";
+  html += "<button type='submit'>Save and connect both boards</button></form>";
+  html += "<p style='margin-top:18px'><a href='/reset-wifi' style='color:#fca5a5'>Clear saved Wi-Fi and restart setup</a></p>";
+  html += "</main></body></html>";
   portalServer.send(200, "text/html", html);
 }
 
@@ -795,15 +834,69 @@ void handleSetupSave() {
   strlcpy(config.controlUrl, portalServer.arg("control_url").c_str(), sizeof(config.controlUrl));
   saveConfig();
 
+  camProvisionAcked = false;
+  camProvisionAckMessage = "";
+  camAckAt = 0;
   setupSaveRequested = true;
   setupProvisionReady = true;
+  setupSavedAt = millis();
   Serial.println("Setup saved. Provision payload is ready for ESP32-CAM.");
 
   portalServer.send(200, "text/html",
                     "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    "<meta http-equiv='refresh' content='3;url=/'>"
                     "<body style='font-family:system-ui;background:#0b1020;color:#eef2ff;padding:24px'>"
-                    "<h1>Saved</h1><p>Keep ESP32-CAM powered on. The vehicle is connecting and sharing Wi-Fi now.</p>"
-                    "<p>You can close this page after both boards reboot/connect.</p></body>");
+                    "<h1>Settings saved</h1>"
+                    "<p>The car is testing the new Wi-Fi now.</p>"
+                    "<p>If the password is wrong or the Wi-Fi cannot be reached, the setup page will stay available.</p>"
+                    "<p>Returning to setup page...</p></body>");
+}
+
+
+
+String wifiFingerprint() {
+  // Simple consistency fingerprint. Password itself is never returned by the API.
+  uint32_t h = 2166136261UL;
+  String data = String(config.wifiSsid) + "|" + String(config.wifiPass);
+  for (size_t i = 0; i < data.length(); ++i) {
+    h ^= (uint8_t)data[i];
+    h *= 16777619UL;
+  }
+  char out[9];
+  snprintf(out, sizeof(out), "%08lX", (unsigned long)h);
+  return String(out);
+}
+
+void sendCamWifiCheck() {
+  JsonDocument doc;
+  doc["ok"] = true;
+  doc["configured"] = strlen(config.wifiSsid) > 0;
+  doc["ssid"] = config.wifiSsid;
+  doc["fingerprint"] = wifiFingerprint();
+
+  String body;
+  serializeJson(doc, body);
+  portalServer.send(200, "application/json", body);
+}
+
+void handleCamAck() {
+  if (!setupProvisionReady) {
+    portalServer.send(409, "application/json", "{\"ok\":false,\"error\":\"no_provision_ready\"}");
+    return;
+  }
+
+  String status = portalServer.hasArg("status") ? portalServer.arg("status") : "saved";
+  String message = portalServer.hasArg("message") ? portalServer.arg("message") : "";
+
+  if (status == "saved" || status == "ok" || status == "ready") {
+    camProvisionAcked = true;
+    camProvisionAckMessage = message;
+    camAckAt = millis();
+    Serial.println("ESP32-CAM ACK received: " + status);
+    portalServer.send(200, "application/json", "{\"ok\":true,\"action\":\"vehicle_may_switch\"}");
+  } else {
+    portalServer.send(400, "application/json", "{\"ok\":false,\"error\":\"bad_status\"}");
+  }
 }
 
 void startSetupPortal() {
@@ -812,6 +905,9 @@ void startSetupPortal() {
   setupConnectDone = false;
   setupConnectOk = false;
   setupSavedAt = 0;
+  camProvisionAcked = false;
+  camProvisionAckMessage = "";
+  camAckAt = 0;
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP("FPV-Car-Setup", "12345678");
@@ -822,37 +918,84 @@ void startSetupPortal() {
   portalServer.on("/", HTTP_GET, sendSetupPage);
   portalServer.on("/save", HTTP_POST, handleSetupSave);
   portalServer.on("/api/cam-provision", HTTP_GET, sendCamProvision);
+  portalServer.on("/api/wifi-check", HTTP_GET, sendCamWifiCheck);
+  portalServer.on("/api/cam-ack", HTTP_POST, handleCamAck);
   portalServer.begin();
 
   Serial.println("Open http://192.168.4.1 to configure Wi-Fi for both boards.");
   while (true) {
     portalServer.handleClient();
 
-    if (setupSaveRequested && !setupConnectDone) {
+    // Do NOT switch the vehicle yet. Keep the setup AP alive so the camera can
+    // join it, pull the new credentials, save them, and send an ACK.
+    if (setupProvisionReady && !camProvisionAcked) {
+      if (millis() - setupSavedAt > CAM_ACK_TIMEOUT_MS) {
+        Serial.println("Timed out waiting for ESP32-CAM ACK. Keeping setup portal open.");
+        setupSavedAt = millis(); // keep waiting; user can retry without losing the portal
+      }
+    }
+
+    // Only after the camera confirms it has saved the new Wi-Fi do we switch the car.
+    if (setupProvisionReady && camProvisionAcked && !setupConnectDone) {
+      Serial.println("Camera acknowledged provision. Vehicle is switching Wi-Fi now.");
       setupConnectOk = connectToConfiguredWiFi(25000, true);
       setupConnectDone = true;
       setupSavedAt = millis();
-      Serial.println(setupConnectOk ? "Vehicle WiFi connected. Waiting for CAM to fetch provision." :
-                                      "Vehicle WiFi failed. CAM can still fetch the saved provision.");
+
+      if (!setupConnectOk) {
+        Serial.println("Vehicle Wi-Fi failed. Keeping setup portal open for correction.");
+        setupConnectDone = false;
+        camProvisionAcked = false; // require a fresh camera ACK after another save
+        WiFi.disconnect(false, false);
+      }
     }
 
-    if (setupConnectDone && millis() - setupSavedAt > 10000) break;
+    if (setupConnectDone && setupConnectOk && millis() - setupSavedAt > 3000) {
+      Serial.println("Vehicle setup completed after camera ACK.");
+      break;
+    }
+
+    delay(10);
+  }
+  portalServer.stop();
+  WiFi.softAPdisconnect(true);
+}
+
+void setupWiFiManager() {
+  // Every boot: briefly expose the vehicle setup AP so ESP32-CAM can verify
+  // that its saved Wi-Fi matches the vehicle before normal operation.
+  bootSyncActive = true;
+  setupProvisionReady = strlen(config.wifiSsid) > 0;
+  camProvisionAcked = false;
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP("FPV-Car-Setup", "12345678");
+  Serial.println("Boot Wi-Fi sync AP started for ESP32-CAM.");
+
+  portalServer.stop();
+  portalServer.on("/api/cam-provision", HTTP_GET, sendCamProvision);
+  portalServer.on("/api/wifi-check", HTTP_GET, sendCamWifiCheck);
+  portalServer.on("/api/cam-ack", HTTP_POST, handleCamAck);
+  portalServer.begin();
+
+  unsigned long startedAt = millis();
+  while (
+    millis() - startedAt < BOOT_SYNC_WINDOW_MS &&
+    !camProvisionAcked
+  ) {
+    portalServer.handleClient();
     delay(10);
   }
 
   portalServer.stop();
   WiFi.softAPdisconnect(true);
+  bootSyncActive = false;
+  setupProvisionReady = false;
+  Serial.println("Boot Wi-Fi sync window finished.");
 
-  if (!setupConnectOk) {
-    Serial.println("Setup WiFi failed. Restarting setup portal.");
-    delay(1000);
-    ESP.restart();
-  }
-}
-
-void setupWiFiManager() {
+  // After the camera had its chance to verify/update, connect the vehicle.
   if (connectToConfiguredWiFi(18000, false)) return;
-  Serial.println("Saved WiFi unavailable. Starting one-time setup portal.");
+
+  Serial.println("Saved WiFi unavailable. Starting setup portal.");
   startSetupPortal();
 }
 
@@ -946,6 +1089,15 @@ void loop() {
   webSocket.loop();
   portalServer.handleClient();
   processWifiScan();
+
+  if (wifiSwitchPending && (long)(millis() - wifiSwitchAt) >= 0) {
+    wifiSwitchPending = false;
+    Serial.println("Switching ESP32 vehicle to the newly saved WiFi...");
+    WiFi.disconnect(true, true);
+    delay(300);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(config.wifiSsid, config.wifiPass);
+  }
 
   unsigned long now = millis();
   if (buzzerOffAt > 0 && now >= buzzerOffAt) {

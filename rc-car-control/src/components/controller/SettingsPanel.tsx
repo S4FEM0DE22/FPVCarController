@@ -494,7 +494,7 @@ export default function SettingsPanel({
                   ) : null}
 
                   <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-950">
-                    รถจะขาดการเชื่อมต่อชั่วคราว หากไม่กลับมาออนไลน์ ให้เข้า FPV-Car-Setup เพื่อตั้งค่าใหม่
+                    รถและกล้องจะขาดการเชื่อมต่อชั่วคราว แล้วเชื่อม Wi-Fi ใหม่นี้พร้อมกัน
                   </div>
 
                   <button
@@ -507,7 +507,7 @@ export default function SettingsPanel({
                       : !vehicleOnline
                       ? "รอ ESP32 ออนไลน์"
                       : selectedNetwork
-                      ? `ใช้ ${selectedNetwork.ssid} กับรถ`
+                      ? `ใช้ ${selectedNetwork.ssid} กับรถและกล้อง`
                       : "เลือก Wi-Fi ก่อน"}
                   </button>
                 </div>

@@ -182,27 +182,6 @@ export default function ControllerPage() {
 
   const handleSharedWifiChange = async (ssid: string, password: string) => {
     handleSystemAction("WIFI_SET", { ssid, password });
-
-    if (!cameraStreamUrl) return;
-
-    const cameraUrl = new URL(cameraStreamUrl);
-    const body = new URLSearchParams({
-      ssid,
-      password,
-      controlUrl: `${window.location.origin}/controller`,
-    });
-
-    const response = await fetch(`${cameraUrl.origin}/api/wifi`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body,
-    });
-
-    if (!response.ok) {
-      throw new Error("ESP32-CAM WiFi update failed");
-    }
   };
 
   const controlGuide = [

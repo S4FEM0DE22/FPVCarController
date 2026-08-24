@@ -35,11 +35,11 @@ http://192.168.4.1
 
 After saving:
 
-- The ESP32 vehicle saves the Wi-Fi and connects to it.
-- The ESP32 vehicle keeps the setup AP open briefly and exposes `/api/cam-provision`.
-- The ESP32-CAM joins `FPV-Car-Setup`, fetches the same Wi-Fi/controller/cloud settings, saves them to Preferences, then connects to the same Wi-Fi.
+- The ESP32 vehicle saves the Wi-Fi and keeps `FPV-Car-Setup` active.
+- The ESP32-CAM fetches the same Wi-Fi/controller/cloud settings and saves them to Preferences.
+- The ESP32-CAM acknowledges that the settings were saved, then both boards connect to the new Wi-Fi.
 
-On later boots, both boards connect to the saved Wi-Fi automatically. You do not need to open the setup page again unless you change Wi-Fi or clear settings.
+On later boots, the vehicle briefly exposes the setup AP so the camera can verify that both saved configurations match. When they match, the camera acknowledges immediately and both boards continue to the saved Wi-Fi. You do not need to open the setup page again unless you clear settings or the saved Wi-Fi cannot be reached.
 
 ## ESP32 Vehicle Setup
 
@@ -70,7 +70,7 @@ Default TB6612FNG pins are declared at the top of the sketch. Change them to mat
 <control_url>?cam=http://<camera-ip>/stream
 ```
 
-The web app stores this camera URL in `localStorage`, so it keeps working after refresh on desktop, phone, and tablet. When cloud WebSocket settings are configured, the ESP32-CAM publishes JPEG frames directly as binary WebSocket messages. The camera waits for a `camera_frame_ack` before capturing the next cloud frame, while the relay and browser keep only the newest frame. This prevents delayed JPEG frames from building up when the connection slows down.
+The web app stores this camera URL in `localStorage`, so it keeps working after refresh on desktop, phone, and tablet. When cloud WebSocket settings are configured, the ESP32-CAM publishes JPEG frames directly as binary WebSocket messages. The relay and browser keep only the newest usable frame so delayed JPEG frames do not build up when the connection slows down.
 
 The Vehicle tab in Settings provides three persistent cloud stream profiles:
 
@@ -87,11 +87,13 @@ Deploy the updated relay and web app before flashing this ESP32-CAM firmware. Th
 The controller page can change Wi-Fi for both boards from one form:
 
 - The web app sends `WIFI_SCAN` through the cloud relay. The ESP32 scans nearby 2.4 GHz networks and returns SSID, signal strength, channel, and security status for the selection list.
-- ESP32 vehicle receives `WIFI_SET` through the existing WebSocket `action` channel.
-- ESP32-CAM receives the same SSID/password through `POST http://<camera-ip>/api/wifi`.
-- Both boards save the new Wi-Fi to Preferences, so the next boot uses the new network automatically.
+- The relay forwards one `WIFI_SET` action to both the ESP32 vehicle and ESP32-CAM over their existing secure WebSocket connections.
+- Both boards save the new Wi-Fi to Preferences, send their final status, then reconnect after a short delay.
+- The controller does not need direct access to the camera IP, so the change also works when the browser and car use different networks.
 
-This works best when the web controller, ESP32, and ESP32-CAM are reachable on the same LAN. If the controller is served over HTTPS, browsers may block calls to an `http://` ESP32-CAM address as mixed content; for local demos, use the controller over `http://<computer-lan-ip>:3000/controller`.
+If the new Wi-Fi credentials are incorrect, power-cycle both boards and reconnect to `FPV-Car-Setup` to correct them.
+
+The relay treats the camera as offline after about 10 seconds without a frame or stream-status message. It clears the cached frame at the same time, preventing the controller from showing a stale online state after camera power is removed.
 
 Deploy the updated relay and flash the updated `esp32-vehicle.ino` before using the scan list. Older relay or firmware versions do not understand `wifi_scan_result`.
 
