@@ -12,6 +12,8 @@ Install these from Arduino IDE Library Manager:
 - ArduinoJson by Benoit Blanchon
 - WebSockets by Markus Sattler
 - ESP32Servo by Kevin Harrington / John K. Bennett
+- Adafruit GFX Library
+- Adafruit SSD1306
 
 Also install the ESP32 board package in Arduino IDE.
 
@@ -28,6 +30,23 @@ Connect the boards before powering the car:
 UART uses 3.3 V logic. Do not connect either UART pin to 5 V. GPIO13 and GPIO14 on the ESP32-CAM are available only when the microSD interface is not used. Power for both boards still comes from the regulated supply; UART does not power the camera.
 
 The link runs at `115200 8N1`. The sketches assign UART pins explicitly, so the USB Serial Monitor remains available on the normal programming port.
+
+## OLED Status Display
+
+The vehicle firmware supports an optional 0.96-inch SSD1306 I2C OLED (`128x64`, address `0x3C`):
+
+| OLED | ESP32 vehicle |
+| --- | --- |
+| VCC | 3V3 |
+| GND | GND |
+| SDA | GPIO21 |
+| SCL | GPIO22 |
+
+The display shows power state for both boards, separate vehicle/camera Wi-Fi SSIDs, separate cloud states, vehicle/camera RSSI, battery percentage, drive mode, and pan/tilt offset. ESP32-CAM sends a UART heartbeat every 1.5 seconds; the OLED marks the camera offline after about 5 seconds without a heartbeat.
+
+At boot the OLED shows `FPV CAR POWER ON`. A remote reboot shows `RESTARTING`, and the shared Wi-Fi reset shows `RESET WIFI` while both boards are cleared over UART. A physical power cut removes power from the OLED immediately, so showing `POWER OFF` after the switch is turned off requires a separate standby supply or small backup capacitor circuit.
+
+The OLED is optional. If no display is detected at `0x3C`, the vehicle prints a message to Serial Monitor and continues normally. If your module uses address `0x3D`, change `OLED_I2C_ADDRESS` near the top of `esp32-vehicle.ino`.
 
 ## First-Time Shared Wi-Fi Setup
 

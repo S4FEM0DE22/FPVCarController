@@ -9,7 +9,6 @@ import {
   Check,
   LockKeyhole,
   Power,
-  Radio,
   RefreshCw,
   SlidersHorizontal,
   Wifi,
@@ -131,7 +130,6 @@ export default function SettingsPanel({
       vehicleWifiGateway === cameraWifiGateway);
   const networkReady =
     vehicleOnline &&
-    cameraOnline &&
     Boolean(selectedNetwork) &&
     (!selectedNetwork?.secure || password.length > 0);
 
@@ -567,8 +565,6 @@ export default function SettingsPanel({
                       ? "กำลังส่งค่า..."
                       : !vehicleOnline
                       ? "รอ ESP32 ออนไลน์"
-                      : !cameraOnline
-                      ? "รอ ESP32-CAM ออนไลน์"
                       : selectedNetwork
                       ? `ใช้ ${selectedNetwork.ssid} กับรถและกล้อง`
                       : "เลือก Wi-Fi ก่อน"}
@@ -601,17 +597,17 @@ export default function SettingsPanel({
                   <button
                     onClick={() =>
                       requestConfirmAction({
-                        title: "Open WiFi Setup Mode?",
+                        title: "รีเซต Wi-Fi ทั้งสองบอร์ด?",
                         description:
-                          "Vehicle may switch to setup mode and disconnect normal remote control until reconfigured.",
-                        successMessage: "สั่งเปิด WiFi setup mode แล้ว",
+                          "ระบบจะล้าง Wi-Fi ของ ESP32 และ ESP32-CAM ผ่าน UART แล้วเปิด FPV-Car-Setup การควบคุมระยะไกลจะหยุดจนกว่าจะตั้งค่าใหม่",
+                        successMessage: "กำลังรีเซต Wi-Fi ทั้งสองบอร์ด",
                         action: onOpenWifiPortal,
                       })
                     }
                     disabled={submitting}
                     className="flex items-center justify-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-900 transition hover:bg-amber-100 disabled:opacity-50"
                   >
-                    <Radio size={16} /> เปิดโหมด FPV-Car-Setup
+                    <WifiOff size={16} /> รีเซต Wi-Fi ทั้งสองบอร์ด
                   </button>
 
                   <button

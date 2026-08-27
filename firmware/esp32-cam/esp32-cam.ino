@@ -107,6 +107,7 @@ bool uartProvisionReceived = false;
 unsigned long uartProvisionRestartAt = 0;
 String lastCommittedWifiCommandId = "";
 String lastCommittedWifiSsid = "";
+unsigned long lastVehicleUartStatusAt = 0;
 
 String deviceName();
 String streamUrl();
@@ -118,6 +119,7 @@ void tuneCloudJpegQuality();
 void setCloudMotionMode(bool active);
 void applyCloudStreamProfile(const char *profile, bool persist);
 void processVehicleUart();
+void sendVehicleUartStatus(bool force = false);
 
 void printCameraConfig() {
   Serial.println();
@@ -595,6 +597,20 @@ void sendVehicleUartDocument(JsonDocument &doc) {
   vehicleUart.flush();
 }
 
+void sendVehicleUartStatus(bool force) {
+  unsigned long now = millis();
+  if (!force && now - lastVehicleUartStatusAt < 1500) return;
+  lastVehicleUartStatusAt = now;
+
+  JsonDocument doc;
+  doc["type"] = "camera_status";
+  doc["wifiConnected"] = WiFi.isConnected();
+  doc["cloudConnected"] = wsConnected;
+  doc["rssi"] = WiFi.isConnected() ? WiFi.RSSI() : -100;
+  doc["ssid"] = WiFi.isConnected() ? WiFi.SSID() : "";
+  sendVehicleUartDocument(doc);
+}
+
 void sendVehicleWifiAck(
   const String &commandId,
   const char *phase,
@@ -645,6 +661,21 @@ void handleVehicleWifiAction(JsonDocument &doc) {
   String action = doc["action"] | "";
   String commandId = doc["commandId"] | "";
   if (commandId.length() == 0) return;
+
+  if (action == "reset") {
+    prefs.begin("fpv-cam", false);
+    prefs.remove("wifiSsid");
+    prefs.remove("wifiPass");
+    prefs.remove("candidateSsid");
+    prefs.remove("candidatePass");
+    prefs.remove("candidateCmd");
+    prefs.remove("candidateState");
+    prefs.end();
+    sendVehicleWifiAck(commandId, "reset", true, "", "camera WiFi cleared");
+    Serial.println("Camera WiFi cleared by vehicle UART. Restarting...");
+    delay(200);
+    ESP.restart();
+  }
 
   if (action == "prepare") {
     String ssid = doc["ssid"] | "";
@@ -1128,6 +1159,7 @@ bool connectToConfiguredWiFi(unsigned long timeoutMs) {
   unsigned long startedAt = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startedAt < timeoutMs) {
     processVehicleUart();
+    sendVehicleUartStatus();
     if (uartProvisionReceived) {
       stopStaConnectionAttempt();
       return false;
@@ -1194,6 +1226,7 @@ void setupWiFiManager() {
   Serial.println("Saved WiFi unavailable. Waiting for vehicle UART provisioning.");
   while (!uartProvisionReceived) {
     processVehicleUart();
+    sendVehicleUartStatus();
     delay(10);
   }
 
@@ -1218,6 +1251,7 @@ void setup() {
   pinMode(FLASH_LED_PIN, OUTPUT);
   digitalWrite(FLASH_LED_PIN, LOW);
   loadConfig();
+  sendVehicleUartStatus(true);
   clearPersistedWifiCandidate();
   WiFi.mode(WIFI_STA);
   Serial.print("ESP32-CAM WiFi MAC: ");
@@ -1235,6 +1269,7 @@ void setup() {
 
 void loop() {
   processVehicleUart();
+  sendVehicleUartStatus();
   webSocket.loop();
   server.handleClient();
 

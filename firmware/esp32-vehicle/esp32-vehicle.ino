@@ -1,17 +1,22 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include <DNSServer.h>
 #include <ESP32Servo.h>
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WebSocketsClient.h>
+#include <Wire.h>
 #include <math.h>
 
 // Required libraries:
 // - ArduinoJson by Benoit Blanchon
 // - WebSockets by Markus Sattler
 // - ESP32Servo by Kevin Harrington / John K. Bennett
+// - Adafruit GFX Library
+// - Adafruit SSD1306
 
 // TB6612FNG pin map. Change these to match your wiring.
 static const int PIN_AIN1 = 26;
@@ -30,6 +35,11 @@ static const int PIN_BATTERY_ADC = 34;
 static const int PIN_CAM_UART_RX = 16;
 static const int PIN_CAM_UART_TX = 17;
 static const uint32_t CAM_UART_BAUD = 115200;
+static const int PIN_OLED_SDA = 21;
+static const int PIN_OLED_SCL = 22;
+static const uint8_t OLED_I2C_ADDRESS = 0x3C;
+static const int OLED_WIDTH = 128;
+static const int OLED_HEIGHT = 64;
 
 static const int MOTOR_PWM_MAX = 255;
 static const char *SETUP_AP_SSID = "FPV-Car-Setup";
@@ -76,6 +86,7 @@ WebSocketsClient webSocket;
 WebServer portalServer(80);
 DNSServer dnsServer;
 HardwareSerial cameraUart(2);
+Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
 Servo panServo;
 Servo tiltServo;
 VehicleConfig config;
@@ -99,6 +110,14 @@ String camProvisionAckMessage = "";
 String setupProvisionRequestId = "";
 String cameraUartBuffer = "";
 unsigned long lastCameraUartSendAt = 0;
+unsigned long lastCameraUartStatusAt = 0;
+unsigned long lastOledUpdateAt = 0;
+bool oledReady = false;
+bool cameraUartWifiConnected = false;
+bool cameraUartCloudConnected = false;
+int cameraUartRssi = -100;
+String cameraUartSsid = "";
+float lastBatteryPercent = 0;
 unsigned long camAckAt = 0;
 const unsigned long CAM_ACK_TIMEOUT_MS = 120000; // wait up to 2 minutes for camera
 bool setupConnectDone = false;
@@ -125,6 +144,8 @@ bool wifiCandidateStatusSent = false;
 bool wifiUartCameraPrepared = false;
 bool wifiUartCameraArmed = false;
 bool wifiVehicleCommitted = false;
+String wifiResetCommandId = "";
+bool wifiResetCameraAcked = false;
 unsigned long wifiTransactionStartedAt = 0;
 const unsigned long WIFI_COMMIT_TIMEOUT_MS = 60000;
 const unsigned long WIFI_UART_RETRY_MS = 900;
@@ -132,6 +153,8 @@ const unsigned long WIFI_UART_RETRY_MS = 900;
 void sendDeviceLog(const char *level, const String &message);
 void handleResetWiFi();
 void processCameraUart();
+void updateOled(bool force = false);
+void showOledMessage(const String &title, const String &detail = "");
 
 String deviceName() {
   uint64_t chipId = ESP.getEfuseMac();
@@ -150,6 +173,104 @@ int clampInt(int value, int minValue, int maxValue) {
   if (value < minValue) return minValue;
   if (value > maxValue) return maxValue;
   return value;
+}
+
+String oledFit(const String &value, size_t maxChars) {
+  if (value.length() <= maxChars) return value;
+  if (maxChars <= 3) return value.substring(0, maxChars);
+  return value.substring(0, maxChars - 3) + "...";
+}
+
+void initOled() {
+  Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
+  oledReady = oled.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS);
+  if (!oledReady) {
+    Serial.println("OLED not found at I2C address 0x3C; continuing without display.");
+    return;
+  }
+
+  oled.clearDisplay();
+  oled.setTextColor(SSD1306_WHITE);
+  oled.setTextSize(1);
+  oled.setCursor(0, 0);
+  oled.println("FPV CAR POWER ON");
+  oled.println();
+  oled.println("Starting systems...");
+  oled.display();
+  Serial.println("OLED ready: SSD1306 128x64 address=0x3C SDA=21 SCL=22");
+}
+
+void showOledMessage(const String &title, const String &detail) {
+  if (!oledReady) return;
+  oled.clearDisplay();
+  oled.setTextColor(SSD1306_WHITE);
+  oled.setTextSize(1);
+  oled.setCursor(0, 8);
+  oled.println(oledFit(title, 21));
+  oled.drawFastHLine(0, 20, OLED_WIDTH, SSD1306_WHITE);
+  oled.setCursor(0, 30);
+  oled.println(oledFit(detail, 21));
+  oled.display();
+}
+
+void updateOled(bool force) {
+  if (!oledReady) return;
+  unsigned long now = millis();
+  if (!force && now - lastOledUpdateAt < 500) return;
+  lastOledUpdateAt = now;
+
+  const bool cameraUartOnline =
+    lastCameraUartStatusAt > 0 && now - lastCameraUartStatusAt < 5000;
+  wifi_mode_t wifiMode = WiFi.getMode();
+  const bool setupApActive = wifiMode == WIFI_AP || wifiMode == WIFI_AP_STA;
+  String wifiLabel = WiFi.isConnected()
+    ? WiFi.SSID()
+    : setupApActive
+    ? String(SETUP_AP_SSID)
+    : String("OFF");
+  const char *cameraLabel = !cameraUartOnline
+    ? "OFF"
+    : cameraUartCloudConnected
+    ? "ON"
+    : cameraUartWifiConnected
+    ? "NET"
+    : "UART";
+
+  oled.clearDisplay();
+  oled.setTextColor(SSD1306_WHITE);
+  oled.setTextSize(1);
+  oled.setCursor(0, 0);
+  oled.print("Power V:ON C:");
+  oled.println(cameraUartOnline ? "ON" : "OFF");
+  oled.print("V-WiFi:");
+  oled.println(oledFit(wifiLabel, 14));
+  oled.print("C-WiFi:");
+  oled.println(
+    cameraUartOnline && cameraUartWifiConnected
+      ? oledFit(cameraUartSsid, 14)
+      : String("OFF")
+  );
+  oled.print("Cloud V:");
+  oled.print(wsConnected ? "ON" : "OFF");
+  oled.print(" C:");
+  oled.println(cameraLabel);
+  oled.print("Bat:");
+  oled.print((int)round(lastBatteryPercent));
+  oled.print("% R:");
+  oled.print(WiFi.isConnected() ? WiFi.RSSI() : -100);
+  oled.print("/");
+  if (cameraUartOnline && cameraUartWifiConnected) {
+    oled.print(cameraUartRssi);
+  } else {
+    oled.print("--");
+  }
+  oled.println();
+  oled.print(oledFit(drive.command, 8));
+  oled.print(" P:");
+  oled.print(panDeg - SERVO_PAN_CENTER);
+  oled.print(" T:");
+  oled.println(tiltDeg - SERVO_TILT_CENTER);
+  oled.display();
 }
 
 void loadConfig() {
@@ -502,6 +623,14 @@ void handleCameraUartLine(const String &line) {
   }
 
   const char *type = doc["type"] | "";
+  if (strcmp(type, "camera_status") == 0) {
+    lastCameraUartStatusAt = millis();
+    cameraUartWifiConnected = doc["wifiConnected"] | false;
+    cameraUartCloudConnected = doc["cloudConnected"] | false;
+    cameraUartRssi = doc["rssi"] | -100;
+    cameraUartSsid = String(doc["ssid"] | "");
+    return;
+  }
   if (strcmp(type, "provision_ack") == 0) {
     String requestId = doc["requestId"] | "";
     if (
@@ -519,9 +648,17 @@ void handleCameraUartLine(const String &line) {
 
   if (strcmp(type, "wifi_ack") != 0) return;
   String commandId = doc["commandId"] | "";
+  String phase = doc["phase"] | "";
+  if (
+    phase == "reset" &&
+    commandId == wifiResetCommandId &&
+    (doc["ok"] | false)
+  ) {
+    wifiResetCameraAcked = true;
+    return;
+  }
   if (commandId != wifiTransactionCommandId) return;
 
-  String phase = doc["phase"] | "";
   String ssid = doc["ssid"] | wifiCandidateSsid;
   String message = doc["message"] | "camera UART acknowledgement";
   bool ok = doc["ok"] | false;
@@ -591,11 +728,12 @@ void sendStatus(const char *message) {
 }
 
 void sendTelemetry() {
+  lastBatteryPercent = readBatteryPercent();
   JsonDocument doc;
   doc["type"] = "telemetry";
   doc["vehicleId"] = config.vehicleId;
   doc["online"] = WiFi.isConnected() && wsConnected;
-  doc["battery"] = (int)round(readBatteryPercent());
+  doc["battery"] = (int)round(lastBatteryPercent);
   doc["wifi"] = readWifiRssi();
   doc["wifiSsid"] = WiFi.isConnected() ? WiFi.SSID() : "";
   doc["wifiGateway"] = WiFi.isConnected() ? WiFi.gatewayIP().toString() : "";
@@ -848,6 +986,45 @@ void rollbackWifiCandidate(const char *commandId, const char *reason) {
   clearWifiTransaction();
 }
 
+void resetSharedWifi(const char *commandId) {
+  stopDrive();
+  wifiResetCommandId = commandId && strlen(commandId) > 0
+    ? String(commandId)
+    : String("wifi-reset-local");
+  wifiResetCameraAcked = false;
+  showOledMessage("RESET WIFI", "Waiting for CAM...");
+
+  unsigned long startedAt = millis();
+  unsigned long lastSentAt = 0;
+  while (!wifiResetCameraAcked && millis() - startedAt < 2500) {
+    if (lastSentAt == 0 || millis() - lastSentAt >= 350) {
+      sendCameraWifiUart("reset", wifiResetCommandId);
+      lastSentAt = millis();
+    }
+    processCameraUart();
+    delay(10);
+  }
+
+  prefs.begin("fpv-car", false);
+  prefs.remove("wifiSsid");
+  prefs.remove("wifiPass");
+  prefs.remove("candidateSsid");
+  prefs.remove("candidatePass");
+  prefs.remove("candidateCmd");
+  prefs.remove("candidateState");
+  prefs.end();
+
+  showOledMessage(
+    "RESET WIFI",
+    wifiResetCameraAcked ? "Both boards cleared" : "Vehicle cleared"
+  );
+  ackCommand(commandId, wifiResetCameraAcked
+    ? "WiFi cleared on both boards"
+    : "Vehicle WiFi cleared; camera ACK not received");
+  delay(900);
+  ESP.restart();
+}
+
 void handleAction(JsonDocument &doc) {
   const char *action = doc["action"] | "";
   const char *commandId = doc["commandId"] | "";
@@ -888,8 +1065,9 @@ void handleAction(JsonDocument &doc) {
   } else if (strcmp(action, "NETWORK_RECONNECT") == 0) {
     WiFi.reconnect();
   } else if (strcmp(action, "REBOOT") == 0) {
+    showOledMessage("RESTARTING", "Vehicle reboot");
     ackCommand(commandId, "rebooting ESP32");
-    delay(120);
+    delay(700);
     ESP.restart();
   } else if (strcmp(action, "PROFILE_APPLY") == 0) {
     applyBehaviorProfile(payload);
@@ -906,18 +1084,9 @@ void handleAction(JsonDocument &doc) {
   } else if (strcmp(action, "WIFI_ROLLBACK") == 0) {
     rollbackWifiCandidate(commandId, "relay requested rollback");
   } else if (strcmp(action, "WIFI_PORTAL_OPEN") == 0) {
-    Serial.println("Opening WiFi setup portal after restart");
-    prefs.begin("fpv-car", false);
-    prefs.remove("wifiSsid");
-    prefs.remove("wifiPass");
-    prefs.remove("candidateSsid");
-    prefs.remove("candidatePass");
-    prefs.remove("candidateCmd");
-    prefs.remove("candidateState");
-    prefs.end();
-    ackCommand(commandId, "restarting into WiFi setup portal");
-    delay(150);
-    ESP.restart();
+    Serial.println("Resetting shared WiFi and opening setup portal");
+    resetSharedWifi(commandId);
+    return;
   }
 
   if (strncmp(action, "CAM", 3) == 0) {
@@ -1032,6 +1201,8 @@ bool connectToConfiguredWiFi(unsigned long timeoutMs, bool keepSetupAp) {
   while (WiFi.status() != WL_CONNECTED && millis() - startedAt < timeoutMs) {
     if (keepSetupAp) dnsServer.processNextRequest();
     portalServer.handleClient();
+    processCameraUart();
+    updateOled();
     delay(100);
     Serial.print(".");
   }
@@ -1148,16 +1319,7 @@ void sendSetupStatus() {
 void handleResetWiFi() {
   portalServer.send(200, "text/html; charset=utf-8", "<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width'><body style='font-family:system-ui;padding:24px'><h2>ล้างค่าแล้ว</h2><p>กำลังเริ่มโหมดตั้งค่าใหม่...</p></body>");
   delay(300);
-  prefs.begin("fpv-car", false);
-  prefs.remove("wifiSsid");
-  prefs.remove("wifiPass");
-  prefs.remove("candidateSsid");
-  prefs.remove("candidatePass");
-  prefs.remove("candidateCmd");
-  prefs.remove("candidateState");
-  prefs.end();
-  WiFi.disconnect(true, true);
-  ESP.restart();
+  resetSharedWifi("wifi-reset-local");
 }
 
 void handleSetupSave() {
@@ -1242,6 +1404,7 @@ void startSetupPortal() {
     dnsServer.processNextRequest();
     portalServer.handleClient();
     processCameraUart();
+    updateOled();
 
     if (
       setupProvisionReady &&
@@ -1371,6 +1534,7 @@ void setup() {
   Serial.println();
   Serial.println("Booting FPV Car ESP32...");
   Serial.println("ESP32-CAM UART ready: RX=GPIO16 TX=GPIO17 baud=115200");
+  initOled();
   loadConfig();
   clearPersistedWifiCandidate();
   panServo.setPeriodHertz(50);
@@ -1395,6 +1559,7 @@ void loop() {
   webSocket.loop();
   portalServer.handleClient();
   processWifiScan();
+  updateOled();
 
   unsigned long now = millis();
 
