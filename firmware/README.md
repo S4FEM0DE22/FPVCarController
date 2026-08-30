@@ -2,7 +2,8 @@
 
 This folder contains Arduino sketches for the project hardware:
 
-- `esp32-vehicle/esp32-vehicle.ino` controls the TB6612FNG motor driver, pan/tilt servos, light, buzzer, WebSocket connection, and telemetry.
+- `esp32-vehicle-a4950/esp32-vehicle-a4950.ino` is the vehicle sketch for the A4950 dual-channel board.
+- `esp32-vehicle-tb6612/esp32-vehicle-tb6612.ino` is the vehicle sketch for the TB6612FNG board.
 - `esp32-cam/esp32-cam.ino` runs an ESP32-CAM MJPEG stream and redirects users to the web controller with the camera stream URL.
 
 ## Required Arduino Libraries
@@ -16,6 +17,45 @@ Install these from Arduino IDE Library Manager:
 - Adafruit SSD1306
 
 Also install the ESP32 board package in Arduino IDE.
+
+## A4950 Motor Driver Wiring
+
+The A4950 variant is configured for the Massmore A4950 dual-channel board shown in the project notes. It has two A4950 driver chips and uses four logic inputs. PWM is sent through the active direction input, so the old TB6612 `PWMA`, `PWMB`, and `STBY` wires are not used.
+
+| A4950 board | ESP32 vehicle |
+| --- | --- |
+| AIN1 | GPIO26 |
+| AIN2 | GPIO27 |
+| BIN1 | GPIO14 |
+| BIN2 | GPIO12 |
+| VCC (3–5.5V) | 3V3 |
+| VM (8–40V) | Motor battery through fuse |
+| GND | Common GND |
+| AOUT1/AOUT2 | Left motor |
+| BOUT1/BOUT2 | Right motor |
+
+Do not connect GPIO25, GPIO13, or GPIO33 to this A4950 board. Add bulk capacitance near `VM-GND`, keep the motor supply separate from the ESP32 regulator, and never connect or disconnect motor wires while powered.
+
+## TB6612FNG Motor Driver Wiring
+
+The TB6612 variant keeps the original three-signal-per-channel control:
+
+| TB6612FNG | ESP32 vehicle |
+| --- | --- |
+| AIN1 | GPIO26 |
+| AIN2 | GPIO27 |
+| PWMA | GPIO25 |
+| BIN1 | GPIO14 |
+| BIN2 | GPIO12 |
+| PWMB | GPIO13 |
+| STBY | GPIO33 |
+| VCC | 3V3 |
+| VM | Motor battery through fuse |
+| GND | Common GND |
+| AO1/AO2 | Left motor |
+| BO1/BO2 | Right motor |
+
+Use only one driver wiring layout at a time. Do not connect the A4950 and TB6612 signal layouts together.
 
 ## UART Wiring Between Boards
 
@@ -31,6 +71,17 @@ UART uses 3.3 V logic. Do not connect either UART pin to 5 V. GPIO13 and GPIO14 
 
 The link runs at `115200 8N1`. The sketches assign UART pins explicitly, so the USB Serial Monitor remains available on the normal programming port.
 
+## Hardware Wi-Fi Reset Button
+
+The vehicle supports a physical shared Wi-Fi reset button on `GPIO32`:
+
+| Button | ESP32 vehicle |
+| --- | --- |
+| One terminal | GPIO32 |
+| Other terminal | GND |
+
+The firmware uses the internal pull-up resistor (`INPUT_PULLUP`). Press and hold the button for 3 seconds. The vehicle stops, clears saved Wi-Fi on both boards over UART, shows the reset state on the OLED, and restarts into `FPV-Car-Setup`. Do not connect this button to `3V3`.
+
 ## OLED Status Display
 
 The vehicle firmware supports an optional 0.96-inch SSD1306 I2C OLED (`128x64`, address `0x3C`):
@@ -42,11 +93,13 @@ The vehicle firmware supports an optional 0.96-inch SSD1306 I2C OLED (`128x64`, 
 | SDA | GPIO21 |
 | SCL | GPIO22 |
 
-The display shows power state for both boards, separate vehicle/camera Wi-Fi SSIDs, separate cloud states, vehicle/camera RSSI, battery percentage, drive mode, and pan/tilt offset. ESP32-CAM sends a UART heartbeat every 1.5 seconds; the OLED marks the camera offline after about 5 seconds without a heartbeat.
+Both vehicle sketches use one fixed OLED dashboard so the important information is visible at a glance: vehicle/camera Wi-Fi, cloud links, battery, RSSI, drive command, and pan/tilt offsets. Text is shortened to fit the 128x64 display. ESP32-CAM sends a UART heartbeat every 1.5 seconds; the OLED marks the camera offline after about 5 seconds without a heartbeat.
 
-At boot the OLED shows `FPV CAR POWER ON`. A remote reboot shows `RESTARTING`, and the shared Wi-Fi reset shows `RESET WIFI` while both boards are cleared over UART. A physical power cut removes power from the OLED immediately, so showing `POWER OFF` after the switch is turned off requires a separate standby supply or small backup capacitor circuit.
+The horn output is intended for an active 3.3V buzzer: connect buzzer `+` to `GPIO4` and buzzer `-` to `GND`. The firmware drives `GPIO4` HIGH for 300 ms when `HORN` is received, without PWM. Use a transistor or MOSFET if the buzzer module draws more current than an ESP32 GPIO can safely supply.
 
-The OLED is optional. If no display is detected at `0x3C`, the vehicle prints a message to Serial Monitor and continues normally. If your module uses address `0x3D`, change `OLED_I2C_ADDRESS` near the top of `esp32-vehicle.ino`.
+At boot the OLED shows `FPV CAR` while the system starts. A remote reboot shows `RESTARTING`, and the shared Wi-Fi reset shows `RESET WIFI` while both boards are cleared over UART. A physical power cut removes power from the OLED immediately, so showing `POWER OFF` after the switch is turned off requires a separate standby supply or small backup capacitor circuit.
+
+The OLED is optional. If no display is detected at `0x3C`, the vehicle prints a message to Serial Monitor and continues normally. If your module uses address `0x3D`, change `OLED_I2C_ADDRESS` near the top of the selected vehicle sketch.
 
 ## First-Time Shared Wi-Fi Setup
 
@@ -82,7 +135,9 @@ On later boots, both boards use their saved configuration immediately. They do n
 
 ## ESP32 Vehicle Setup
 
-1. Open `esp32-vehicle/esp32-vehicle.ino`.
+1. Open the vehicle variant you need:
+   - `esp32-vehicle-a4950/esp32-vehicle-a4950.ino` for the A4950 board
+   - `esp32-vehicle-tb6612/esp32-vehicle-tb6612.ino` for the TB6612FNG board
 2. Select an ESP32 board, then flash it.
 3. On first boot, use the shared setup page above.
 4. Fill in:
@@ -95,7 +150,9 @@ On later boots, both boards use their saved configuration immediately. They do n
    - `control_url`: web controller URL, for example `http://192.168.1.10:3000/controller`
 5. After saving Wi-Fi, open the ESP32 IP address in a browser. It redirects to the controller page.
 
-Default TB6612FNG pins are declared at the top of the sketch. Change them to match your wiring before flashing.
+Each vehicle variant is a complete standalone sketch. Open and flash only the file that matches the motor driver installed on the car.
+
+When powered on, both variants first hold motor inputs low, then run the Servo test sequence and return to `pan=95`, `tilt=64`. Automatic motor testing is disabled so the vehicle cannot drive unexpectedly at startup. Test motors only after the vehicle is secured and the wheels are lifted.
 
 ## ESP32-CAM Setup
 

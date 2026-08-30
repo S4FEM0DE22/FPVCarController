@@ -112,6 +112,7 @@ export default function useVehicleController() {
   const [wifiScanState, setWifiScanState] = useState<WifiScanState>("idle");
   const [wifiScanError, setWifiScanError] = useState("");
   const lastSentKeyRef = useRef<string>("");
+  const lastMoveSentAtRef = useRef(0);
   const pendingToggleActionsRef = useRef<Set<string>>(new Set());
   const pendingToggleTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const wifiScanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -406,6 +407,7 @@ export default function useVehicleController() {
           setTelemetry,
           setCameraOrientation,
           lastSentKeyRef,
+          lastMoveSentAtRef,
           sendRaw,
         },
         command,
@@ -441,6 +443,7 @@ export default function useVehicleController() {
           setTelemetry,
           setCameraOrientation,
           lastSentKeyRef,
+          lastMoveSentAtRef,
           sendRaw,
           pendingToggleActionsRef,
           pendingToggleTimeoutRef,

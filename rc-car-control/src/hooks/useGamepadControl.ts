@@ -89,10 +89,15 @@ export default function useGamepadControl({
 
     let rafId = 0;
     let lastActionAt = 0;
+    let lastMoveSentAt = 0;
     let lastMoveKey = "";
     let hadActiveInput = false;
     let hornPressed = false;
     let cameraResetPressed = false;
+    let lightButtonWasPressed = false;
+    let cameraToggleWasPressed = false;
+    let cameraResetButtonWasPressed = false;
+    let stopButtonWasPressed = false;
 
     const updateActionPress = (
       action: Extract<ActionCommand, "HORN" | "CAM_RESET">,
@@ -111,6 +116,7 @@ export default function useGamepadControl({
 
     const loop = () => {
       const pad = findConnectedGamepad();
+      const now = Date.now();
 
       if (pad) {
         const lx = clamp(pad.axes[0] || 0, -1, 1);
@@ -137,39 +143,51 @@ export default function useGamepadControl({
 
         if (isActive) {
           hadActiveInput = true;
-          if (moveKey !== lastMoveKey) {
+          if (moveKey !== lastMoveKey || now - lastMoveSentAt >= 250) {
             lastMoveKey = moveKey;
+            lastMoveSentAt = now;
             onMoveRef.current(command, { throttle, steering });
           }
         } else if (hadActiveInput) {
           hadActiveInput = false;
           lastMoveKey = "STOP:0:0";
+          lastMoveSentAt = 0;
           onMoveRef.current("STOP", { throttle: 0, steering: 0 });
         }
 
         updateActionPress("HORN", Boolean(pad.buttons[0]?.pressed));
         updateActionPress("CAM_RESET", Boolean(pad.buttons[3]?.pressed));
 
-        const now = Date.now();
-        if (now - lastActionAt > 220) {
+        const lightButtonPressed = Boolean(pad.buttons[1]?.pressed);
+        const cameraTogglePressed = Boolean(pad.buttons[2]?.pressed);
+        const cameraResetButtonPressed = Boolean(pad.buttons[3]?.pressed);
+        const stopButtonPressed = Boolean(pad.buttons[9]?.pressed);
+
+        // Toggles and reset are edge-triggered so holding a gamepad button
+        // cannot flip the state repeatedly.
+        if (lightButtonPressed && !lightButtonWasPressed) {
+          onActionRef.current("LIGHT_TOGGLE");
+          lastActionAt = now;
+        } else if (cameraTogglePressed && !cameraToggleWasPressed) {
+          onActionRef.current("CAMERA_TOGGLE");
+          lastActionAt = now;
+        } else if (
+          cameraResetButtonPressed &&
+          !cameraResetButtonWasPressed
+        ) {
+          onActionRef.current("CAM_RESET");
+          lastActionAt = now;
+        } else if (stopButtonPressed && !stopButtonWasPressed) {
+          hadActiveInput = false;
+          lastMoveKey = "STOP:0:0";
+          lastMoveSentAt = 0;
+          onMoveRef.current("STOP", { throttle: 0, steering: 0 });
+          lastActionAt = now;
+        } else if (now - lastActionAt > 220) {
           const heldCameraAction = resolveHeldCameraAction(pad, rx, ry);
 
           if (pad.buttons[0]?.pressed) {
             onActionRef.current("HORN");
-            lastActionAt = now;
-          } else if (pad.buttons[1]?.pressed) {
-            onActionRef.current("LIGHT_TOGGLE");
-            lastActionAt = now;
-          } else if (pad.buttons[2]?.pressed) {
-            onActionRef.current("CAMERA_TOGGLE");
-            lastActionAt = now;
-          } else if (pad.buttons[3]?.pressed) {
-            onActionRef.current("CAM_RESET");
-            lastActionAt = now;
-          } else if (pad.buttons[9]?.pressed) {
-            hadActiveInput = false;
-            lastMoveKey = "STOP:0:0";
-            onMoveRef.current("STOP", { throttle: 0, steering: 0 });
             lastActionAt = now;
           } else if (heldCameraAction) {
             onActionRef.current(heldCameraAction.action, {
@@ -178,9 +196,15 @@ export default function useGamepadControl({
             lastActionAt = now;
           }
         }
+
+        lightButtonWasPressed = lightButtonPressed;
+        cameraToggleWasPressed = cameraTogglePressed;
+        cameraResetButtonWasPressed = cameraResetButtonPressed;
+        stopButtonWasPressed = stopButtonPressed;
       } else if (hadActiveInput) {
         hadActiveInput = false;
         lastMoveKey = "STOP:0:0";
+        lastMoveSentAt = 0;
         updateActionPress("HORN", false);
         updateActionPress("CAM_RESET", false);
         onMoveRef.current("STOP", { throttle: 0, steering: 0 });

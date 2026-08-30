@@ -18,22 +18,23 @@
 // - Adafruit GFX Library
 // - Adafruit SSD1306
 
-// TB6612FNG pin map. Change these to match your wiring.
+// Massmore A4950 dual-channel pin map. Each channel uses two logic inputs;
+// PWM is applied to the active direction input.
 static const int PIN_AIN1 = 26;
 static const int PIN_AIN2 = 27;
-static const int PIN_PWMA = 25;
 static const int PIN_BIN1 = 14;
 static const int PIN_BIN2 = 12;
-static const int PIN_PWMB = 13;
-static const int PIN_STBY = 33;
+static const char *MOTOR_DRIVER_NAME = "A4950";
 
 static const int PIN_SERVO_PAN = 18;
 static const int PIN_SERVO_TILT = 19;
 static const int PIN_LIGHT = 2;
 static const int PIN_BUZZER = 4;
+static const unsigned long BUZZER_DURATION_MS = 300;
 static const int PIN_BATTERY_ADC = 34;
 static const int PIN_CAM_UART_RX = 16;
 static const int PIN_CAM_UART_TX = 17;
+static const int PIN_WIFI_RESET_BUTTON = 32;
 static const uint32_t CAM_UART_BAUD = 115200;
 static const int PIN_OLED_SDA = 21;
 static const int PIN_OLED_SCL = 22;
@@ -112,7 +113,10 @@ String cameraUartBuffer = "";
 unsigned long lastCameraUartSendAt = 0;
 unsigned long lastCameraUartStatusAt = 0;
 unsigned long lastOledUpdateAt = 0;
+unsigned long wifiResetButtonPressedAt = 0;
 bool oledReady = false;
+bool wifiResetButtonPressed = false;
+bool wifiResetButtonHandled = false;
 bool cameraUartWifiConnected = false;
 bool cameraUartCloudConnected = false;
 int cameraUartRssi = -100;
@@ -153,8 +157,11 @@ const unsigned long WIFI_UART_RETRY_MS = 900;
 void sendDeviceLog(const char *level, const String &message);
 void handleResetWiFi();
 void processCameraUart();
+void pollWifiResetButton();
 void updateOled(bool force = false);
 void showOledMessage(const String &title, const String &detail = "");
+void startBuzzer();
+void stopBuzzer();
 
 String deviceName() {
   uint64_t chipId = ESP.getEfuseMac();
@@ -193,7 +200,7 @@ void initOled() {
   oled.setTextColor(SSD1306_WHITE);
   oled.setTextSize(1);
   oled.setCursor(0, 0);
-  oled.println("FPV CAR POWER ON");
+  oled.println("FPV CAR");
   oled.println();
   oled.println("Starting systems...");
   oled.display();
@@ -235,41 +242,60 @@ void updateOled(bool force) {
     : cameraUartWifiConnected
     ? "NET"
     : "UART";
+  const int battery = clampInt((int)round(lastBatteryPercent), 0, 100);
+  const int vehicleRssi = WiFi.isConnected() ? WiFi.RSSI() : -100;
+  const char *vehicleWifiState = WiFi.isConnected() ? "OK" : "OFF";
+  const char *cameraWifiState =
+    cameraUartOnline && cameraUartWifiConnected ? "OK" : "OFF";
 
   oled.clearDisplay();
   oled.setTextColor(SSD1306_WHITE);
   oled.setTextSize(1);
   oled.setCursor(0, 0);
-  oled.print("Power V:ON C:");
-  oled.println(cameraUartOnline ? "ON" : "OFF");
-  oled.print("V-WiFi:");
-  oled.println(oledFit(wifiLabel, 14));
-  oled.print("C-WiFi:");
+  oled.print("FPV ");
+  oled.print(MOTOR_DRIVER_NAME);
+  oled.setCursor(98, 0);
+  oled.print(wsConnected ? "V+" : "V-");
+  oled.print(cameraUartOnline ? " C+" : " C-");
+  oled.drawFastHLine(0, 9, OLED_WIDTH, SSD1306_WHITE);
+
+  oled.setCursor(0, 12);
+  oled.print("WIFI  V:");
+  oled.print(vehicleWifiState);
+  oled.print(" C:");
+  oled.println(cameraWifiState);
+  oled.setCursor(0, 21);
+  oled.print("V: ");
+  oled.println(oledFit(wifiLabel, 18));
+  oled.setCursor(0, 30);
+  oled.print("C: ");
   oled.println(
     cameraUartOnline && cameraUartWifiConnected
-      ? oledFit(cameraUartSsid, 14)
+      ? oledFit(cameraUartSsid, 18)
       : String("OFF")
   );
-  oled.print("Cloud V:");
+  oled.setCursor(0, 39);
+  oled.print("CLOUD V:");
   oled.print(wsConnected ? "ON" : "OFF");
   oled.print(" C:");
   oled.println(cameraLabel);
-  oled.print("Bat:");
-  oled.print((int)round(lastBatteryPercent));
-  oled.print("% R:");
-  oled.print(WiFi.isConnected() ? WiFi.RSSI() : -100);
-  oled.print("/");
-  if (cameraUartOnline && cameraUartWifiConnected) {
-    oled.print(cameraUartRssi);
-  } else {
-    oled.print("--");
-  }
-  oled.println();
-  oled.print(oledFit(drive.command, 8));
-  oled.print(" P:");
+  oled.setCursor(0, 48);
+  oled.print("BAT ");
+  oled.drawRect(25, 48, 38, 8, SSD1306_WHITE);
+  oled.fillRect(27, 50, (battery * 34) / 100, 4, SSD1306_WHITE);
+  oled.setCursor(68, 48);
+  oled.print(battery);
+  oled.print("% R");
+  oled.print(vehicleRssi);
+  oled.setCursor(0, 57);
+  oled.print("DRV ");
+  oled.print(oledFit(drive.command, 6));
+  oled.print(" P");
+  oled.print(panDeg - SERVO_PAN_CENTER >= 0 ? "+" : "");
   oled.print(panDeg - SERVO_PAN_CENTER);
-  oled.print(" T:");
-  oled.println(tiltDeg - SERVO_TILT_CENTER);
+  oled.print(" T");
+  oled.print(tiltDeg - SERVO_TILT_CENTER >= 0 ? "+" : "");
+  oled.print(tiltDeg - SERVO_TILT_CENTER);
   oled.display();
 }
 
@@ -381,20 +407,22 @@ const char *webSocketTypeName(WStype_t type) {
   }
 }
 
-void setMotorRaw(int in1, int in2, int pwmPin, float value) {
+void setMotorRaw(int in1, int in2, float value) {
   int pwm = clampInt((int)(fabs(value) * MOTOR_PWM_MAX), 0, MOTOR_PWM_MAX);
   if (value > 0.02f) {
-    digitalWrite(in1, HIGH);
+    analogWrite(in2, 0);
     digitalWrite(in2, LOW);
+    analogWrite(in1, pwm);
   } else if (value < -0.02f) {
     digitalWrite(in1, LOW);
-    digitalWrite(in2, HIGH);
+    analogWrite(in1, 0);
+    analogWrite(in2, pwm);
   } else {
+    analogWrite(in1, 0);
+    analogWrite(in2, 0);
     digitalWrite(in1, LOW);
     digitalWrite(in2, LOW);
-    pwm = 0;
   }
-  analogWrite(pwmPin, pwm);
 }
 
 void applyDrive(float throttle, float steering) {
@@ -407,9 +435,8 @@ void applyDrive(float throttle, float steering) {
   float left = clampFloat(throttle + steeringMix, -1, 1);
   float right = clampFloat(throttle - steeringMix, -1, 1);
 
-  digitalWrite(PIN_STBY, HIGH);
-  setMotorRaw(PIN_AIN1, PIN_AIN2, PIN_PWMA, left);
-  setMotorRaw(PIN_BIN1, PIN_BIN2, PIN_PWMB, -right);
+  setMotorRaw(PIN_AIN1, PIN_AIN2, left);
+  setMotorRaw(PIN_BIN1, PIN_BIN2, -right);
 }
 
 void stopDrive() {
@@ -1025,6 +1052,33 @@ void resetSharedWifi(const char *commandId) {
   ESP.restart();
 }
 
+void pollWifiResetButton() {
+  const bool pressed = digitalRead(PIN_WIFI_RESET_BUTTON) == LOW;
+  const unsigned long now = millis();
+
+  if (!pressed) {
+    wifiResetButtonPressed = false;
+    wifiResetButtonHandled = false;
+    return;
+  }
+
+  if (!wifiResetButtonPressed) {
+    wifiResetButtonPressed = true;
+    wifiResetButtonHandled = false;
+    wifiResetButtonPressedAt = now;
+    Serial.println("WiFi reset button pressed; hold for 3 seconds.");
+    showOledMessage("WIFI BUTTON", "Hold 3 seconds");
+    return;
+  }
+
+  if (!wifiResetButtonHandled && now - wifiResetButtonPressedAt >= 3000) {
+    wifiResetButtonHandled = true;
+    Serial.println("WiFi reset button confirmed. Clearing both boards...");
+    sendDeviceLog("info", "Hardware WiFi reset button confirmed");
+    resetSharedWifi("wifi-reset-button");
+  }
+}
+
 void handleAction(JsonDocument &doc) {
   const char *action = doc["action"] | "";
   const char *commandId = doc["commandId"] | "";
@@ -1047,8 +1101,7 @@ void handleAction(JsonDocument &doc) {
     lightOn = !lightOn;
     digitalWrite(PIN_LIGHT, lightOn ? HIGH : LOW);
   } else if (strcmp(action, "HORN") == 0) {
-    digitalWrite(PIN_BUZZER, HIGH);
-    buzzerOffAt = millis() + 180;
+    startBuzzer();
   } else if (strcmp(action, "CAMERA_TOGGLE") == 0) {
     cameraOn = !cameraOn;
   } else if (strcmp(action, "CAM_RESET") == 0) {
@@ -1489,18 +1542,31 @@ void setupWebSocket() {
 void setupPins() {
   pinMode(PIN_AIN1, OUTPUT);
   pinMode(PIN_AIN2, OUTPUT);
-  pinMode(PIN_PWMA, OUTPUT);
   pinMode(PIN_BIN1, OUTPUT);
   pinMode(PIN_BIN2, OUTPUT);
-  pinMode(PIN_PWMB, OUTPUT);
-  pinMode(PIN_STBY, OUTPUT);
+  // Keep both A4950 channels low before any other peripheral starts.
+  digitalWrite(PIN_AIN1, LOW);
+  digitalWrite(PIN_AIN2, LOW);
+  digitalWrite(PIN_BIN1, LOW);
+  digitalWrite(PIN_BIN2, LOW);
   pinMode(PIN_LIGHT, OUTPUT);
   pinMode(PIN_BUZZER, OUTPUT);
   pinMode(PIN_BATTERY_ADC, INPUT);
-  digitalWrite(PIN_STBY, HIGH);
+  pinMode(PIN_WIFI_RESET_BUTTON, INPUT_PULLUP);
   digitalWrite(PIN_LIGHT, LOW);
   digitalWrite(PIN_BUZZER, LOW);
-  stopDrive();
+}
+
+void startBuzzer() {
+  // Active 3.3V buzzer: drive it with a steady HIGH, without PWM.
+  digitalWrite(PIN_BUZZER, LOW);
+  digitalWrite(PIN_BUZZER, HIGH);
+  buzzerOffAt = millis() + BUZZER_DURATION_MS;
+}
+
+void stopBuzzer() {
+  digitalWrite(PIN_BUZZER, LOW);
+  buzzerOffAt = 0;
 }
 
 void testServosOnBoot() {
@@ -1528,6 +1594,8 @@ void testServosOnBoot() {
 
 void setup() {
   Serial.begin(115200);
+  // Establish a stopped motor state before UART, OLED, Wi-Fi, or Servo startup.
+  setupPins();
   cameraUart.setRxBufferSize(2048);
   cameraUart.begin(CAM_UART_BAUD, SERIAL_8N1, PIN_CAM_UART_RX, PIN_CAM_UART_TX);
   delay(300);
@@ -1547,7 +1615,8 @@ void setup() {
   Serial.print(", tilt GPIO");
   Serial.println(PIN_SERVO_TILT);
   testServosOnBoot();
-  setupPins();
+  // stopDrive() uses PWM; call it only after Servo has been attached.
+  stopDrive();
   setupWiFiManager();
   printConnectionConfig();
   setupPortalRedirect();
@@ -1560,6 +1629,7 @@ void loop() {
   portalServer.handleClient();
   processWifiScan();
   updateOled();
+  pollWifiResetButton();
 
   unsigned long now = millis();
 
@@ -1647,8 +1717,7 @@ void loop() {
     restoreActiveWifi("cloud commit timed out");
   }
   if (buzzerOffAt > 0 && now >= buzzerOffAt) {
-    digitalWrite(PIN_BUZZER, LOW);
-    buzzerOffAt = 0;
+    stopBuzzer();
   }
 
   if (drive.command != "STOP" && now - lastCommandAt > 900) {

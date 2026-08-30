@@ -11,6 +11,7 @@ const PAN_MAX = 175;
 const TILT_CENTER = 64;
 const TILT_MIN = 30;
 const TILT_MAX = 110;
+const MOVE_HEARTBEAT_INTERVAL_MS = 250;
 
 export interface CameraOrientation {
   pan: number;
@@ -23,6 +24,7 @@ interface CreateVehicleControllerOptions {
   setTelemetry: Dispatch<SetStateAction<VehicleTelemetry>>;
   setCameraOrientation: Dispatch<SetStateAction<CameraOrientation>>;
   lastSentKeyRef: MutableRefObject<string>;
+  lastMoveSentAtRef: MutableRefObject<number>;
   sendRaw: (payload: ReturnType<typeof buildControlMessage> | ReturnType<typeof buildActionMessage>) => boolean;
   pendingToggleActionsRef?: MutableRefObject<Set<string>>;
   pendingToggleTimeoutRef?: MutableRefObject<NodeJS.Timeout | null>;
@@ -65,7 +67,13 @@ export function handleMove(
   source: ControlSource,
   payload?: Record<string, unknown>
 ) {
-  const { setLastCommand, setTelemetry, lastSentKeyRef, sendRaw } = options;
+  const {
+    setLastCommand,
+    setTelemetry,
+    lastSentKeyRef,
+    lastMoveSentAtRef,
+    sendRaw,
+  } = options;
 
   setLastCommand(command);
 
@@ -78,9 +86,15 @@ export function handleMove(
   const payloadKey = JSON.stringify(finalPayload);
   const dedupeKey = `${command}:${source}:${payloadKey}`;
 
-  if (dedupeKey === lastSentKeyRef.current) return;
+  const now = Date.now();
+  const heartbeatDue =
+    command !== "STOP" &&
+    now - lastMoveSentAtRef.current >= MOVE_HEARTBEAT_INTERVAL_MS;
+
+  if (dedupeKey === lastSentKeyRef.current && !heartbeatDue) return;
 
   lastSentKeyRef.current = dedupeKey;
+  lastMoveSentAtRef.current = command === "STOP" ? 0 : now;
   sendRaw(buildControlMessage(command, source, finalPayload));
 }
 
