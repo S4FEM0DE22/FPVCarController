@@ -63,7 +63,8 @@ unsigned long wifiSwitchAt = 0;
 bool wifiSwitchInProgress = false;
 unsigned long wifiSwitchStartedAt = 0;
 const unsigned long WIFI_SWITCH_TIMEOUT_MS = 25000;
-const unsigned long WIFI_RECONNECT_INTERVAL_MS = 5000;
+const unsigned long WIFI_RECONNECT_GRACE_MS = 2000;
+const unsigned long WIFI_RECONNECT_INTERVAL_MS = 10000;
 unsigned long wifiDisconnectedAt = 0;
 unsigned long lastWifiReconnectAttemptAt = 0;
 unsigned long lastFrameAt = 0;
@@ -662,6 +663,12 @@ void handleVehicleWifiAction(JsonDocument &doc) {
   String commandId = doc["commandId"] | "";
   if (commandId.length() == 0) return;
 
+  Serial.printf(
+    "Vehicle WiFi UART action: action=%s command=%s\n",
+    action.c_str(),
+    commandId.c_str()
+  );
+
   if (action == "reset") {
     prefs.begin("fpv-cam", false);
     prefs.remove("wifiSsid");
@@ -727,6 +734,16 @@ void handleVehicleWifiAction(JsonDocument &doc) {
   } else if (action == "switch") {
     if (!wifiTransactionArmed) {
       sendVehicleWifiAck(commandId, "switching", false, wifiCandidateSsid, "camera was not armed");
+      return;
+    }
+    if (wifiSwitchPending || wifiSwitchInProgress || wifiCandidateConnected) {
+      sendVehicleWifiAck(
+        commandId,
+        "switching",
+        true,
+        wifiCandidateSsid,
+        "camera switch already scheduled"
+      );
       return;
     }
     unsigned long delayMs = constrain((unsigned long)(doc["delayMs"] | 3000), 1500UL, 5000UL);
@@ -1184,6 +1201,18 @@ bool connectToConfiguredWiFi(unsigned long timeoutMs) {
 
 void maintainWiFiConnection(unsigned long now) {
   if (WiFi.status() == WL_CONNECTED) {
+    if (
+      strlen(config.wifiSsid) > 0 &&
+      WiFi.SSID() != String(config.wifiSsid)
+    ) {
+      Serial.print("ESP32-CAM connected to unexpected SSID: ");
+      Serial.print(WiFi.SSID());
+      Serial.print("; selecting configured SSID: ");
+      Serial.println(config.wifiSsid);
+      lastWifiReconnectAttemptAt = now;
+      beginStaConnection(config.wifiSsid, config.wifiPass, true);
+      return;
+    }
     if (wifiDisconnectedAt != 0) {
       Serial.print("ESP32-CAM WiFi restored: ");
       Serial.print(WiFi.SSID());
@@ -1204,6 +1233,8 @@ void maintainWiFiConnection(unsigned long now) {
     Serial.printf("ESP32-CAM WiFi lost (status=%d). Starting recovery...\n", WiFi.status());
   }
 
+  if (now - wifiDisconnectedAt < WIFI_RECONNECT_GRACE_MS) return;
+
   if (lastWifiReconnectAttemptAt != 0 &&
       now - lastWifiReconnectAttemptAt < WIFI_RECONNECT_INTERVAL_MS) {
     return;
@@ -1212,12 +1243,7 @@ void maintainWiFiConnection(unsigned long now) {
   lastWifiReconnectAttemptAt = now;
   Serial.print("Retrying saved WiFi: ");
   Serial.println(config.wifiSsid);
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.setAutoReconnect(true);
-  if (!WiFi.reconnect()) {
-    WiFi.begin(config.wifiSsid, config.wifiPass);
-  }
+  beginStaConnection(config.wifiSsid, config.wifiPass, true);
 }
 
 void setupWiFiManager() {
@@ -1294,19 +1320,17 @@ void loop() {
       strlcpy(config.wifiPass, wifiCandidatePass.c_str(), sizeof(config.wifiPass));
     }
     Serial.println("Switching ESP32-CAM to the newly saved WiFi...");
-    WiFi.disconnect(false, false);
-    delay(300);
-    WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);
-    WiFi.setAutoReconnect(true);
-    WiFi.begin(config.wifiSsid, config.wifiPass);
+    beginStaConnection(config.wifiSsid, config.wifiPass, true);
   }
 
   maintainWiFiConnection(millis());
   sendCloudFrame();
 
   if (wifiSwitchInProgress) {
-    if (WiFi.status() == WL_CONNECTED) {
+    if (
+      WiFi.status() == WL_CONNECTED &&
+      WiFi.SSID() == String(config.wifiSsid)
+    ) {
       wifiSwitchInProgress = false;
       Serial.println("ESP32-CAM connected to the new WiFi.");
       if (wifiFallbackInProgress) {

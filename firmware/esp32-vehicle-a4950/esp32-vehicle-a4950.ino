@@ -147,12 +147,17 @@ bool wifiFallbackInProgress = false;
 bool wifiCandidateStatusSent = false;
 bool wifiUartCameraPrepared = false;
 bool wifiUartCameraArmed = false;
+bool wifiUartCameraSwitchScheduled = false;
+bool wifiUartCameraCommitted = false;
 bool wifiVehicleCommitted = false;
 String wifiResetCommandId = "";
 bool wifiResetCameraAcked = false;
 unsigned long wifiTransactionStartedAt = 0;
+unsigned long wifiTransactionCompletedAt = 0;
 const unsigned long WIFI_COMMIT_TIMEOUT_MS = 60000;
+const unsigned long WIFI_COMPLETED_HOLD_MS = 60000;
 const unsigned long WIFI_UART_RETRY_MS = 900;
+const unsigned long WIFI_UART_SWITCH_DELAY_MS = 3000;
 
 void sendDeviceLog(const char *level, const String &message);
 void handleResetWiFi();
@@ -581,8 +586,11 @@ void clearWifiTransaction() {
   wifiCandidateStatusSent = false;
   wifiUartCameraPrepared = false;
   wifiUartCameraArmed = false;
+  wifiUartCameraSwitchScheduled = false;
+  wifiUartCameraCommitted = false;
   wifiVehicleCommitted = false;
   wifiTransactionStartedAt = 0;
+  wifiTransactionCompletedAt = 0;
   wifiSwitchPending = false;
   wifiSwitchInProgress = false;
   clearPersistedWifiCandidate();
@@ -730,10 +738,17 @@ void handleCameraUartLine(const String &line) {
   bool ok = doc["ok"] | false;
   if (phase == "prepared" && ok) wifiUartCameraPrepared = true;
   if (phase == "armed" && ok) wifiUartCameraArmed = true;
+  if (phase == "switching" && ok) wifiUartCameraSwitchScheduled = true;
+  if (phase == "committed" && ok) wifiUartCameraCommitted = true;
+  Serial.printf(
+    "Camera WiFi UART ACK: phase=%s ok=%s\n",
+    phase.c_str(),
+    ok ? "yes" : "no"
+  );
   forwardCameraWifiPhase(phase.c_str(), ok, ssid, message);
 
   if (phase == "committed" && ok && wifiVehicleCommitted) {
-    clearWifiTransaction();
+    wifiTransactionCompletedAt = millis();
   }
 }
 
@@ -976,6 +991,18 @@ void prepareWifiCandidate(JsonObject payload, const char *commandId) {
     return;
   }
 
+  if (
+    wifiTransactionPrepared &&
+    wifiTransactionCommandId == commandId &&
+    wifiCandidateSsid == ssid
+  ) {
+    if (!wifiUartCameraPrepared) {
+      sendCameraWifiUart("prepare", wifiTransactionCommandId);
+    }
+    sendWifiPhase("prepared", true, "vehicle WiFi candidate already prepared");
+    return;
+  }
+
   clearWifiTransaction();
   wifiTransactionCommandId = commandId;
   wifiCandidateSsid = ssid;
@@ -1017,10 +1044,19 @@ void startWifiCandidateSwitch(const char *commandId) {
     return;
   }
 
-  const unsigned long switchDelayMs = 3000;
-  sendCameraWifiUart("switch", wifiTransactionCommandId, switchDelayMs);
+  if (wifiSwitchPending || wifiSwitchInProgress || wifiCandidateConnected) {
+    sendWifiPhase("switching", true, "coordinated WiFi switch already active");
+    return;
+  }
+
+  wifiUartCameraSwitchScheduled = false;
+  sendCameraWifiUart(
+    "switch",
+    wifiTransactionCommandId,
+    WIFI_UART_SWITCH_DELAY_MS
+  );
   wifiSwitchPending = true;
-  wifiSwitchAt = millis() + switchDelayMs;
+  wifiSwitchAt = millis() + WIFI_UART_SWITCH_DELAY_MS;
   wifiTransactionStartedAt = millis();
   sendWifiPhase("switching", true, "coordinated WiFi switch scheduled over UART");
 }
@@ -1688,7 +1724,20 @@ void loop() {
   ) {
     sendCameraWifiUart("arm", wifiTransactionCommandId);
   } else if (
+    wifiTransactionArmed &&
+    wifiUartCameraArmed &&
+    !wifiUartCameraSwitchScheduled &&
+    (wifiSwitchPending || wifiSwitchInProgress || wifiCandidateConnected) &&
+    now - lastCameraUartSendAt >= WIFI_UART_RETRY_MS
+  ) {
+    sendCameraWifiUart(
+      "switch",
+      wifiTransactionCommandId,
+      WIFI_UART_SWITCH_DELAY_MS
+    );
+  } else if (
     wifiVehicleCommitted &&
+    !wifiUartCameraCommitted &&
     now - lastCameraUartSendAt >= WIFI_UART_RETRY_MS
   ) {
     sendCameraWifiUart("commit", wifiTransactionCommandId);
@@ -1703,14 +1752,20 @@ void loop() {
       strlcpy(config.wifiPass, wifiCandidatePass.c_str(), sizeof(config.wifiPass));
     }
     Serial.println("Switching ESP32 vehicle to the newly saved WiFi...");
+    WiFi.setAutoReconnect(false);
     WiFi.disconnect(false, false);
     delay(300);
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
     WiFi.begin(config.wifiSsid, config.wifiPass);
+    WiFi.setAutoReconnect(true);
   }
 
   if (wifiSwitchInProgress) {
-    if (WiFi.status() == WL_CONNECTED) {
+    if (
+      WiFi.status() == WL_CONNECTED &&
+      WiFi.SSID() == String(config.wifiSsid)
+    ) {
       wifiSwitchInProgress = false;
       Serial.println("ESP32 vehicle connected to the new WiFi.");
       if (wifiFallbackInProgress) {
@@ -1719,6 +1774,14 @@ void loop() {
         wifiCandidateConnected = true;
       }
       wifiCandidateStatusSent = false;
+    } else if (WiFi.status() == WL_CONNECTED) {
+      Serial.print("Vehicle reached unexpected SSID: ");
+      Serial.println(WiFi.SSID());
+      WiFi.setAutoReconnect(false);
+      WiFi.disconnect(false, false);
+      delay(150);
+      WiFi.begin(config.wifiSsid, config.wifiPass);
+      WiFi.setAutoReconnect(true);
     } else if (millis() - wifiSwitchStartedAt > WIFI_SWITCH_TIMEOUT_MS) {
       wifiSwitchInProgress = false;
       if (!wifiFallbackInProgress && wifiTransactionArmed) {
@@ -1754,6 +1817,14 @@ void loop() {
     now - wifiTransactionStartedAt > WIFI_COMMIT_TIMEOUT_MS
   ) {
     restoreActiveWifi("cloud commit timed out");
+  }
+  if (
+    wifiVehicleCommitted &&
+    wifiUartCameraCommitted &&
+    wifiTransactionCompletedAt > 0 &&
+    now - wifiTransactionCompletedAt >= WIFI_COMPLETED_HOLD_MS
+  ) {
+    clearWifiTransaction();
   }
   if (buzzerOffAt > 0 && now >= buzzerOffAt) {
     stopBuzzer();

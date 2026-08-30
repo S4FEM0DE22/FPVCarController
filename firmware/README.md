@@ -185,12 +185,15 @@ The controller page can change Wi-Fi for both boards from one form:
 - The web app sends `WIFI_SCAN` through the cloud relay. The ESP32 scans nearby 2.4 GHz networks and returns SSID, signal strength, channel, and security status for the selection list.
 - The web app sends one `WIFI_SET` request. The relay sends the candidate credentials only to the main ESP32.
 - The main ESP32 keeps its current cloud connection and forwards the candidate to ESP32-CAM over UART. ESP32-CAM pauses cloud frames during the transaction.
-- ESP32-CAM acknowledges `prepared` and `armed` over UART. The main ESP32 forwards those acknowledgements to the relay, which then sends one coordinated switch command.
+- ESP32-CAM acknowledges `prepared`, `armed`, and `switching` over UART. The main ESP32 retries each phase until it receives the matching acknowledgement; duplicate switch requests do not restart the camera countdown.
+- During the switch, both boards disable reconnect to the previous access point and accept success only when the connected SSID matches the selected network. ESP32-CAM also gives a brief disconnect grace period before restarting association, so a slow hotspot or DHCP response is not interrupted repeatedly.
+- The cloud relay repeats the active `WIFI_PREPARE`, `WIFI_APPLY`, `WIFI_SWITCH`, or `WIFI_COMMIT` phase every two seconds until the expected acknowledgement arrives. A short WebSocket interruption therefore no longer loses the one command needed to finish the transaction.
 - Both boards retain their previous active credentials while testing the candidate network.
 - The relay sends `WIFI_COMMIT` to the main ESP32 only after both boards report that they are online through the selected SSID and gateway. The main ESP32 commits locally and forwards the commit to ESP32-CAM over UART.
 - The controller reports success only after both boards acknowledge the commit.
 - If a board fails to prepare, connect, or return to the relay before the timeout, `WIFI_ROLLBACK` restores the previous network. A local commit timeout provides the same recovery if the relay becomes unavailable.
-- The main ESP32 retries UART messages until the matching camera ACK arrives, so the camera can start slightly later without losing the request.
+- During a successful web Wi-Fi change, the vehicle Serial Monitor shows camera ACKs for `prepared`, `armed`, `switching`, and `committed`. If one is missing, check the crossed TX/RX wires and common GND from the UART wiring table above.
+- Keep the relay, selected vehicle sketch, and ESP32-CAM sketch on the same release when changing Wi-Fi from the web app. The retry protocol depends on idempotent handling in all three components.
 - The controller does not need direct access to the camera IP, so the change also works when the browser and car use different networks.
 - Settings compares the SSID and gateway reported by both boards and shows whether they are on the same Wi-Fi.
 

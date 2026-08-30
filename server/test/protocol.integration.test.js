@@ -52,6 +52,7 @@ function startServer() {
       CAMERA_LIVENESS_CHECK_INTERVAL_MS: "100",
       WIFI_UPDATE_ACK_TIMEOUT_MS: "1500",
       WIFI_PREPARE_ACK_TIMEOUT_MS: "300",
+      WIFI_ACTION_RETRY_INTERVAL_MS: "40",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -658,6 +659,117 @@ test("wifi update commits only after vehicle and camera reach the candidate netw
       phase: "committed", ok: true, ssid: "New Network",
     });
     assert.match((await controllerAck).message, /online through New Network/i);
+  } finally {
+    esp.close();
+    camera.close();
+    controller.close();
+  }
+});
+
+test("wifi update retries every relay phase until the vehicle acknowledges it", async () => {
+  const vehicleId = `test-wifi-retry-${Date.now()}`;
+  const url = `ws://127.0.0.1:${serverPort}`;
+  const esp = await connectClient(url);
+  const camera = await connectClient(url);
+  const controller = await connectClient(url);
+
+  try {
+    sendJson(esp, { type: "identify", clientType: "esp", vehicleId });
+    await waitForMessage(esp, (msg) => msg.type === "ack");
+    sendJson(camera, { type: "identify", clientType: "esp-cam", vehicleId });
+    await waitForMessage(camera, (msg) => msg.type === "ack");
+    sendJson(controller, {
+      type: "identify",
+      clientType: "web-controller",
+      vehicleId,
+    });
+    await waitForMessage(controller, (msg) => msg.type === "ack");
+
+    const commandId = `wifi-retry-${Date.now()}`;
+    sendJson(controller, {
+      type: "action",
+      vehicleId,
+      source: "system",
+      action: "WIFI_SET",
+      payload: { ssid: "Retry Network", password: "retry-password" },
+      timestamp: Date.now(),
+      commandId,
+    });
+
+    await waitForMessage(
+      esp,
+      (msg) => msg.type === "action" && msg.action === "WIFI_PREPARE" && msg.commandId === commandId
+    );
+    const retriedPrepare = await waitForMessage(
+      esp,
+      (msg) => msg.type === "action" && msg.action === "WIFI_PREPARE" && msg.commandId === commandId
+    );
+    assert.equal(retriedPrepare.payload.ssid, "Retry Network");
+
+    sendJson(esp, {
+      type: "wifi_phase_ack", vehicleId, commandId,
+      phase: "prepared", ok: true, ssid: "Retry Network",
+    });
+    sendJson(esp, {
+      type: "wifi_uart_camera_phase", vehicleId, commandId,
+      phase: "prepared", ok: true, ssid: "Retry Network",
+    });
+    await waitForMessage(
+      esp,
+      (msg) => msg.type === "action" && msg.action === "WIFI_APPLY" && msg.commandId === commandId
+    );
+    assert.equal((await waitForMessage(
+      esp,
+      (msg) => msg.type === "action" && msg.action === "WIFI_APPLY" && msg.commandId === commandId
+    )).action, "WIFI_APPLY");
+
+    sendJson(esp, {
+      type: "wifi_phase_ack", vehicleId, commandId,
+      phase: "armed", ok: true, ssid: "Retry Network",
+    });
+    sendJson(esp, {
+      type: "wifi_uart_camera_phase", vehicleId, commandId,
+      phase: "armed", ok: true, ssid: "Retry Network",
+    });
+    await waitForMessage(
+      esp,
+      (msg) => msg.type === "action" && msg.action === "WIFI_SWITCH" && msg.commandId === commandId
+    );
+    assert.equal((await waitForMessage(
+      esp,
+      (msg) => msg.type === "action" && msg.action === "WIFI_SWITCH" && msg.commandId === commandId
+    )).action, "WIFI_SWITCH");
+
+    sendJson(esp, {
+      type: "wifi_candidate_status", vehicleId, commandId,
+      state: "connected", ssid: "Retry Network", gateway: "192.168.80.1",
+    });
+    sendJson(camera, {
+      type: "wifi_candidate_status", vehicleId, commandId,
+      state: "connected", ssid: "Retry Network", gateway: "192.168.80.1",
+    });
+    await waitForMessage(
+      esp,
+      (msg) => msg.type === "action" && msg.action === "WIFI_COMMIT" && msg.commandId === commandId
+    );
+    assert.equal((await waitForMessage(
+      esp,
+      (msg) => msg.type === "action" && msg.action === "WIFI_COMMIT" && msg.commandId === commandId
+    )).action, "WIFI_COMMIT");
+
+    const controllerAck = waitForMessage(
+      controller,
+      (msg) => msg.type === "ack" && msg.commandId === commandId
+    );
+    sendJson(esp, {
+      type: "wifi_phase_ack", vehicleId, commandId,
+      phase: "committed", ok: true, ssid: "Retry Network",
+    });
+    sendJson(esp, {
+      type: "wifi_uart_camera_phase", vehicleId, commandId,
+      phase: "committed", ok: true, ssid: "Retry Network",
+    });
+    assert.match((await controllerAck).message, /Retry Network/);
   } finally {
     esp.close();
     camera.close();

@@ -57,6 +57,9 @@ const WIFI_UPDATE_ACK_TIMEOUT_MS = Number(
 const WIFI_PREPARE_ACK_TIMEOUT_MS = Number(
   process.env.WIFI_PREPARE_ACK_TIMEOUT_MS || 20000
 );
+const WIFI_ACTION_RETRY_INTERVAL_MS = Number(
+  process.env.WIFI_ACTION_RETRY_INTERVAL_MS || 2000
+);
 const CAMERA_LIVENESS_TIMEOUT_MS = Number(
   process.env.CAMERA_LIVENESS_TIMEOUT_MS || 10000
 );
@@ -381,6 +384,7 @@ function failPendingWifiChange(entry, message) {
   const pending = entry?.pendingWifiChange;
   if (!pending) return;
   clearTimeout(pending.timeoutId);
+  clearInterval(pending.retryId);
   const rollback = {
     type: "action",
     action: "WIFI_ROLLBACK",
@@ -414,6 +418,24 @@ function sendWifiActionToVehicle(entry, pending, action, includeCredentials = fa
   return safeSend(entry.esp, message);
 }
 
+function retryWifiActionUntilPhaseChanges(
+  entry,
+  pending,
+  action,
+  includeCredentials = false
+) {
+  clearInterval(pending.retryId);
+  pending.retryId = setInterval(() => {
+    if (entry.pendingWifiChange?.commandId !== pending.commandId) {
+      clearInterval(pending.retryId);
+      return;
+    }
+    sendWifiActionToVehicle(entry, pending, action, includeCredentials);
+  }, WIFI_ACTION_RETRY_INTERVAL_MS);
+  pending.retryId.unref?.();
+  return sendWifiActionToVehicle(entry, pending, action, includeCredentials);
+}
+
 function scheduleWifiTransactionTimeout(entry, pending, timeoutMs, message) {
   clearTimeout(pending.timeoutId);
   pending.timeoutId = setTimeout(() => {
@@ -433,16 +455,7 @@ function maybeStartWifiApply(entry, pending) {
     WIFI_UPDATE_ACK_TIMEOUT_MS,
     "WiFi switch timed out; both devices are restoring the previous network"
   );
-  const sent = safeSend(entry.esp, {
-    type: "action",
-    action: "WIFI_APPLY",
-    commandId: pending.commandId,
-    payload: {},
-  });
-  if (!sent) {
-    failPendingWifiChange(entry, "Vehicle disconnected before WiFi apply");
-    return false;
-  }
+  retryWifiActionUntilPhaseChanges(entry, pending, "WIFI_APPLY");
   logger.info({
     event: "wifi_update.apply_sent",
     vehicleId: entry.esp?.meta?.vehicleId || null,
@@ -462,10 +475,7 @@ function maybeStartWifiSwitch(entry, pending) {
     WIFI_UPDATE_ACK_TIMEOUT_MS,
     "WiFi switch timed out; both devices are restoring the previous network"
   );
-  if (!sendWifiActionToVehicle(entry, pending, "WIFI_SWITCH")) {
-    failPendingWifiChange(entry, "Vehicle disconnected before WiFi switch");
-    return false;
-  }
+  retryWifiActionUntilPhaseChanges(entry, pending, "WIFI_SWITCH");
   logger.info({
     event: "wifi_update.switch_sent",
     vehicleId: entry.esp?.meta?.vehicleId || null,
@@ -477,6 +487,7 @@ function maybeStartWifiSwitch(entry, pending) {
 
 function completePendingWifiChange(entry, pending) {
   clearTimeout(pending.timeoutId);
+  clearInterval(pending.retryId);
   entry.pendingWifiChange = null;
   safeSend(pending.controller, {
     type: "ack",
@@ -637,6 +648,7 @@ logger.info({
   cameraRenderAckTimeoutMs: CAMERA_RENDER_ACK_TIMEOUT_MS,
   wifiUpdateAckTimeoutMs: WIFI_UPDATE_ACK_TIMEOUT_MS,
   wifiPrepareAckTimeoutMs: WIFI_PREPARE_ACK_TIMEOUT_MS,
+  wifiActionRetryIntervalMs: WIFI_ACTION_RETRY_INTERVAL_MS,
   cameraLivenessTimeoutMs: CAMERA_LIVENESS_TIMEOUT_MS,
   vehicleLivenessTimeoutMs: VEHICLE_LIVENESS_TIMEOUT_MS,
   cameraLivenessCheckIntervalMs: CAMERA_LIVENESS_CHECK_INTERVAL_MS,
@@ -1134,10 +1146,7 @@ wss.on("connection", (ws, request) => {
           WIFI_PREPARE_ACK_TIMEOUT_MS,
           "A device did not confirm the WiFi commit in time"
         );
-        if (!sendWifiActionToVehicle(entry, pending, "WIFI_COMMIT")) {
-          failPendingWifiChange(entry, "A device disconnected before WiFi commit");
-          return;
-        }
+        retryWifiActionUntilPhaseChanges(entry, pending, "WIFI_COMMIT");
       }
       return;
     }
@@ -1352,6 +1361,7 @@ wss.on("connection", (ws, request) => {
           committed: new Set(),
           gateways: new Map(),
           timeoutId: null,
+          retryId: null,
         };
         entry.pendingWifiChange = pending;
         scheduleWifiTransactionTimeout(
@@ -1361,19 +1371,12 @@ wss.on("connection", (ws, request) => {
           "A device did not prepare the WiFi update in time"
         );
 
-        const vehiclePrepared = safeSend(entry.esp, {
-          type: "action",
-          action: "WIFI_PREPARE",
-          commandId,
-          payload: { ssid, password },
-        });
-        if (!vehiclePrepared) {
-          failPendingWifiChange(
-            entry,
-            "Could not send the WiFi update to the vehicle"
-          );
-          return;
-        }
+        retryWifiActionUntilPhaseChanges(
+          entry,
+          pending,
+          "WIFI_PREPARE",
+          true
+        );
 
         logger.info({
           event: "wifi_update.prepare_sent",
