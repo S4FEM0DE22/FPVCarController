@@ -16,6 +16,7 @@ import { useCameraFrameAvailable } from "@/lib/cameraFrameStore";
 import {
   driveStateLabel,
   formatCameraAim,
+  trackPowerFromDrive,
   trackPowerFromCommand,
 } from "@/components/controller/controlPanelDisplay";
 
@@ -25,6 +26,8 @@ interface CameraPanelProps {
   streamUrl?: string;
   lastCommand?: string;
   lastAction?: string;
+  driveThrottle?: number;
+  driveSteering?: number;
   actionPressed?: boolean;
   cameraPan?: number;
   cameraTilt?: number;
@@ -78,6 +81,8 @@ export default function CameraPanel({
   cameraEnabled = true,
   streamUrl = "",
   lastCommand = "STOP",
+  driveThrottle,
+  driveSteering,
   cameraPan = 95,
   cameraTilt = 64,
   connectionState = "DISCONNECTED",
@@ -117,7 +122,10 @@ export default function CameraPanel({
     ? "invalid-url"
     : statusByUrl[streamUrl] ?? "connecting";
   const streamMeta = streamStatusMeta(streamStatus);
-  const trackPower = trackPowerFromCommand(lastCommand);
+  const trackPower =
+    typeof driveThrottle === "number" && typeof driveSteering === "number"
+      ? trackPowerFromDrive(driveThrottle, driveSteering)
+      : trackPowerFromCommand(lastCommand);
   const driveLabel = driveStateLabel(trackPower.left, trackPower.right);
   const cameraAim = formatCameraAim(cameraPan, cameraTilt);
   const cloudConnected = connectionState === "CONNECTED";

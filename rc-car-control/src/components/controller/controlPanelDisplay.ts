@@ -96,6 +96,34 @@ export function formatCameraAim(pan: number, tilt: number) {
   };
 }
 
+export function trackPowerFromDrive(
+  throttle: number,
+  steering: number
+): { left: number; right: number } {
+  const safeThrottle = Math.max(-1, Math.min(1, throttle));
+  const safeSteering = Math.max(-1, Math.min(1, steering));
+  // Match the proportional differential mix used by both vehicle firmwares.
+  // Steering changes the two tracks relative to the requested speed instead
+  // of immediately saturating one track at 100%. Use speed magnitude for
+  // reverse motion so the logical LEFT/RIGHT direction stays consistent.
+  let left: number;
+  let right: number;
+  if (Math.abs(safeThrottle) <= 0.02) {
+    left = safeSteering;
+    right = -safeSteering;
+  } else {
+    const steeringMix = safeThrottle < 0 ? -safeSteering : safeSteering;
+    const speedMagnitude = Math.abs(safeThrottle);
+    left = safeThrottle + speedMagnitude * steeringMix;
+    right = safeThrottle - speedMagnitude * steeringMix;
+  }
+
+  return {
+    left: Math.round(Math.max(-1, Math.min(1, left)) * 100),
+    right: Math.round(Math.max(-1, Math.min(1, right)) * 100),
+  };
+}
+
 export function trackPowerFromCommand(command: string): { left: number; right: number } {
   switch (command) {
     case "FORWARD":

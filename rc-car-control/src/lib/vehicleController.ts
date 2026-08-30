@@ -74,16 +74,38 @@ export function handleMove(
     lastMoveSentAtRef,
     sendRaw,
   } = options;
+  const finalPayload = payload ?? commandToDrivePayload(command);
+  const throttle =
+    typeof finalPayload.throttle === "number"
+      ? Math.max(-1, Math.min(1, finalPayload.throttle))
+      : 0;
+  const steering =
+    typeof finalPayload.steering === "number"
+      ? Math.max(-1, Math.min(1, finalPayload.steering))
+      : 0;
 
   setLastCommand(command);
 
   setTelemetry((prev) => ({
     ...prev,
     vehicleState: getVehicleStateAfterMove(command, prev.online, prev.vehicleState),
+    driveState: {
+      ...prev.driveState,
+      command,
+      throttle,
+      steering,
+    },
   }));
 
-  const finalPayload = payload ?? commandToDrivePayload(command);
-  const payloadKey = JSON.stringify(finalPayload);
+  // Keep the transmitted values identical to the values shown in telemetry.
+  // This prevents tuning or joystick values from being displayed one way and
+  // sent to the vehicle another way.
+  const controlPayload = {
+    ...finalPayload,
+    throttle,
+    steering,
+  };
+  const payloadKey = JSON.stringify(controlPayload);
   const dedupeKey = `${command}:${source}:${payloadKey}`;
 
   const now = Date.now();
@@ -95,7 +117,7 @@ export function handleMove(
 
   lastSentKeyRef.current = dedupeKey;
   lastMoveSentAtRef.current = command === "STOP" ? 0 : now;
-  sendRaw(buildControlMessage(command, source, finalPayload));
+  sendRaw(buildControlMessage(command, source, controlPayload));
 }
 
 export function handleAction(

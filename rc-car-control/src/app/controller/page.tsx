@@ -318,6 +318,8 @@ export default function ControllerPage() {
                   cameraEnabled={telemetry.cameraOn}
                   streamUrl={cameraStreamUrl}
                   lastCommand={lastCommand}
+                  driveThrottle={telemetry.driveState.throttle}
+                  driveSteering={telemetry.driveState.steering}
                   lastAction={lastAction}
                   actionPressed={actionPressed}
                   cameraPan={cameraPanDeg}
@@ -385,6 +387,8 @@ export default function ControllerPage() {
                       cameraPan={cameraPanDeg}
                       cameraTilt={cameraTiltDeg}
                       lastCommand={lastCommand}
+                      driveThrottle={telemetry.driveState.throttle}
+                      driveSteering={telemetry.driveState.steering}
                       lastAction={lastAction}
                       actionPressed={actionPressed}
                       inputMode={inputMode}
@@ -406,6 +410,8 @@ export default function ControllerPage() {
                       cameraPan={cameraPanDeg}
                       cameraTilt={cameraTiltDeg}
                       lastCommand={lastCommand}
+                      driveThrottle={telemetry.driveState.throttle}
+                      driveSteering={telemetry.driveState.steering}
                       lastAction={lastAction}
                       actionPressed={actionPressed}
                       inputMode={inputMode}

@@ -17,6 +17,7 @@ import {
   driveStateLabel,
   formatCameraAim,
   pressedKeysLabel,
+  trackPowerFromDrive,
   trackPowerFromCommand,
 } from "@/components/controller/controlPanelDisplay";
 import type { InputMode } from "@/types/control";
@@ -40,6 +41,8 @@ interface OperatorStatusPanelProps {
   cameraPan: number;
   cameraTilt: number;
   lastCommand: string;
+  driveThrottle?: number;
+  driveSteering?: number;
   lastAction: string;
   actionPressed: boolean;
   inputMode: InputMode;
@@ -145,6 +148,8 @@ export default function OperatorStatusPanel({
   cameraPan,
   cameraTilt,
   lastCommand,
+  driveThrottle,
+  driveSteering,
   lastAction,
   actionPressed,
   inputMode,
@@ -157,7 +162,10 @@ export default function OperatorStatusPanel({
   const cloudTone: StatusTone = cloudConnected ? "good" : cloudConnecting ? "waiting" : "bad";
   const vehicleTone: StatusTone = vehicleOnline ? "good" : cloudConnected ? "waiting" : "neutral";
   const cameraTone: StatusTone = cameraOnline ? "good" : cloudConnected ? "waiting" : "neutral";
-  const trackPower = trackPowerFromCommand(lastCommand);
+  const trackPower =
+    typeof driveThrottle === "number" && typeof driveSteering === "number"
+      ? trackPowerFromDrive(driveThrottle, driveSteering)
+      : trackPowerFromCommand(lastCommand);
   const cameraAim = formatCameraAim(cameraPan, cameraTilt);
   const InputIcon = inputMode === "gamepad" ? Gamepad2 : inputMode === "touch" ? Smartphone : Keyboard;
 

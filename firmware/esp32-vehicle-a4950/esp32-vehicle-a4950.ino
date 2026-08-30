@@ -429,11 +429,23 @@ void applyDrive(float throttle, float steering) {
   throttle = clampFloat(throttle, -1, 1);
   steering = clampFloat(steering, -1, 1);
 
-  // While reversing, swap the differential steering mix so a logical LEFT
-  // command still moves the vehicle toward its left side.
-  float steeringMix = throttle < -0.02f ? -steering : steering;
-  float left = clampFloat(throttle + steeringMix, -1, 1);
-  float right = clampFloat(throttle - steeringMix, -1, 1);
+  // Proportional differential drive: preserve the requested speed while
+  // reducing one track according to the steering percentage.
+  float left;
+  float right;
+  if (fabs(throttle) <= 0.02f) {
+    left = steering;
+    right = -steering;
+  } else {
+    // While reversing, invert the mix and use speed magnitude so logical
+    // LEFT/RIGHT remains stable in both directions.
+    float steeringMix = throttle < 0 ? -steering : steering;
+    float speedMagnitude = fabs(throttle);
+    left = throttle + speedMagnitude * steeringMix;
+    right = throttle - speedMagnitude * steeringMix;
+  }
+  left = clampFloat(left, -1, 1);
+  right = clampFloat(right, -1, 1);
 
   setMotorRaw(PIN_AIN1, PIN_AIN2, left);
   setMotorRaw(PIN_BIN1, PIN_BIN2, -right);

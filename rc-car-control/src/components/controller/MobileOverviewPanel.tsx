@@ -15,6 +15,7 @@ import {
   driveStateLabel,
   formatCameraAim,
   pressedKeysLabel,
+  trackPowerFromDrive,
   trackPowerFromCommand,
 } from "@/components/controller/controlPanelDisplay";
 import type { InputMode } from "@/types/control";
@@ -36,6 +37,8 @@ interface MobileOverviewPanelProps {
   cameraPan: number;
   cameraTilt: number;
   lastCommand: string;
+  driveThrottle?: number;
+  driveSteering?: number;
   lastAction: string;
   actionPressed: boolean;
   inputMode: InputMode;
@@ -88,6 +91,8 @@ export default function MobileOverviewPanel({
   cameraPan,
   cameraTilt,
   lastCommand,
+  driveThrottle,
+  driveSteering,
   lastAction,
   actionPressed,
   inputMode,
@@ -98,7 +103,10 @@ export default function MobileOverviewPanel({
   const cloudConnected = connectionState === "CONNECTED";
   const cloudConnecting = connectionState === "CONNECTING";
   const ready = cloudConnected && vehicleOnline;
-  const trackPower = trackPowerFromCommand(lastCommand);
+  const trackPower =
+    typeof driveThrottle === "number" && typeof driveSteering === "number"
+      ? trackPowerFromDrive(driveThrottle, driveSteering)
+      : trackPowerFromCommand(lastCommand);
   const cameraAim = formatCameraAim(cameraPan, cameraTilt);
   const InputIcon = inputMode === "gamepad" ? Gamepad2 : inputMode === "touch" ? Smartphone : Keyboard;
   const inputLabel = inputMode === "gamepad" ? "Gamepad" : inputMode === "touch" ? "จอยสัมผัส" : "Keyboard";
