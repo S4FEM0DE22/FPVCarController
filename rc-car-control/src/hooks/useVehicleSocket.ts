@@ -22,6 +22,11 @@ import {
 } from "@/hooks/useVehicleSocketShared";
 const socketLogger = createLogger("vehicle-socket");
 
+interface PendingAckPromise {
+  resolve: (message: string) => void;
+  reject: (error: Error) => void;
+}
+
 export default function useVehicleSocket(
   options?: UseVehicleSocketOptions
 ) {
@@ -35,6 +40,7 @@ export default function useVehicleSocket(
   const reconnectAttemptRef = useRef(0);
   const outboundQueueRef = useRef<OutgoingMessage[]>([]);
   const pendingAckRef = useRef<Map<string, PendingAckEntry>>(new Map());
+  const pendingAckPromiseRef = useRef<Map<string, PendingAckPromise>>(new Map());
   const lastPongAtRef = useRef<number | null>(null);
   const pendingCameraFrameIdRef = useRef<number | null>(null);
 
@@ -82,6 +88,10 @@ export default function useVehicleSocket(
       }
     }
     pendingAckRef.current.clear();
+    for (const pending of pendingAckPromiseRef.current.values()) {
+      pending.reject(new Error("การเชื่อมต่อถูกปิดก่อนอุปกรณ์ตอบรับคำสั่ง"));
+    }
+    pendingAckPromiseRef.current.clear();
     updatePendingAckCount();
   }, [updatePendingAckCount]);
 
@@ -134,6 +144,11 @@ export default function useVehicleSocket(
 
         if (latest.retries >= maxRetries) {
           pendingAckRef.current.delete(commandId);
+          const confirmation = pendingAckPromiseRef.current.get(commandId);
+          if (confirmation) {
+            confirmation.reject(new Error("อุปกรณ์ไม่ตอบรับคำสั่งภายในเวลาที่กำหนด"));
+            pendingAckPromiseRef.current.delete(commandId);
+          }
           updatePendingAckCount();
           setLastError(`Command ACK timeout: ${commandId}`);
           socketLogger.error("command ack timeout", {
@@ -187,17 +202,24 @@ export default function useVehicleSocket(
   );
 
   const resolveAck = useCallback(
-    (commandId?: string) => {
+    (commandId?: string, errorMessage?: string, message = "อุปกรณ์รับคำสั่งแล้ว") => {
       if (!commandId) return;
 
       const pending = pendingAckRef.current.get(commandId);
-      if (!pending) return;
-
-      if (pending.timeoutId !== null) {
+      if (pending?.timeoutId !== null && pending?.timeoutId !== undefined) {
         window.clearTimeout(pending.timeoutId);
       }
 
       pendingAckRef.current.delete(commandId);
+      const confirmation = pendingAckPromiseRef.current.get(commandId);
+      if (confirmation) {
+        if (errorMessage) {
+          confirmation.reject(new Error(errorMessage));
+        } else {
+          confirmation.resolve(message);
+        }
+        pendingAckPromiseRef.current.delete(commandId);
+      }
       updatePendingAckCount();
     },
     [updatePendingAckCount]
@@ -299,6 +321,14 @@ export default function useVehicleSocket(
     }
   }, [enqueueOutbound, sendOverSocket]);
 
+  const waitForAck = useCallback((commandId: string) => {
+    return new Promise<string>((resolve, reject) => {
+      const previous = pendingAckPromiseRef.current.get(commandId);
+      previous?.reject(new Error("มีคำสั่งใหม่ใช้หมายเลขตอบรับซ้ำ"));
+      pendingAckPromiseRef.current.set(commandId, { resolve, reject });
+    });
+  }, []);
+
   const connect = useCallback(function connectSocket() {
     clearTimers();
     setConnectionState("CONNECTING");
@@ -374,11 +404,11 @@ export default function useVehicleSocket(
           }
 
           if (data.type === "ack") {
-            resolveAck(data.commandId);
+            resolveAck(data.commandId, undefined, data.message);
           }
 
           if (data.type === "error" && typeof data.commandId === "string") {
-            resolveAck(data.commandId);
+            resolveAck(data.commandId, data.message || "อุปกรณ์ปฏิเสธคำสั่ง");
           }
 
           onMessageRef.current?.(data);
@@ -477,5 +507,6 @@ export default function useVehicleSocket(
     pendingAckCount,
     lastPongAgeMs,
     sendRaw,
+    waitForAck,
   };
 }

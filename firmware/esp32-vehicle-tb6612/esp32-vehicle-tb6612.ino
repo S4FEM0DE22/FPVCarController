@@ -197,6 +197,45 @@ String oledFit(const String &value, size_t maxChars) {
   return value.substring(0, maxChars - 3) + "...";
 }
 
+const char *oledDriveLabel(const String &command) {
+  if (command == "FORWARD") return "FWD";
+  if (command == "BACKWARD") return "BACK";
+  if (command == "LEFT") return "LEFT";
+  if (command == "RIGHT") return "RGHT";
+  if (command == "FORWARD_LEFT") return "F-L";
+  if (command == "FORWARD_RIGHT") return "F-R";
+  if (command == "BACKWARD_LEFT") return "B-L";
+  if (command == "BACKWARD_RIGHT") return "B-R";
+  return "STOP";
+}
+
+void oledDrawSignalBars(int x, int bottom, int rssi) {
+  int bars = rssi >= -55 ? 4 : rssi >= -67 ? 3 : rssi >= -78 ? 2 : rssi > -100 ? 1 : 0;
+  for (int i = 0; i < 4; i++) {
+    int height = 2 + (i * 2);
+    int y = bottom - height;
+    if (i < bars) {
+      oled.fillRect(x + (i * 5), y, 3, height, SSD1306_WHITE);
+    } else {
+      oled.drawRect(x + (i * 5), y, 3, height, SSD1306_WHITE);
+    }
+  }
+}
+
+void oledDrawDeviceTile(
+  int x,
+  const char *name,
+  bool wifiOnline,
+  bool cloudOnline
+) {
+  oled.drawRoundRect(x, 22, 62, 18, 2, SSD1306_WHITE);
+  oled.setCursor(x + 4, 24);
+  oled.print(name);
+  oled.setCursor(x + 4, 32);
+  oled.print(wifiOnline ? "NET+" : "NET-");
+  oled.print(cloudOnline ? " CLD+" : " CLD-");
+}
+
 void initOled() {
   Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
   oledReady = oled.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS);
@@ -244,18 +283,17 @@ void updateOled(bool force) {
     : setupApActive
     ? String(SETUP_AP_SSID)
     : String("OFF");
-  const char *cameraLabel = !cameraUartOnline
-    ? "OFF"
-    : cameraUartCloudConnected
-    ? "ON"
-    : cameraUartWifiConnected
-    ? "NET"
-    : "UART";
   const int battery = clampInt((int)round(lastBatteryPercent), 0, 100);
   const int vehicleRssi = WiFi.isConnected() ? WiFi.RSSI() : -100;
-  const char *vehicleWifiState = WiFi.isConnected() ? "OK" : "OFF";
-  const char *cameraWifiState =
-    cameraUartOnline && cameraUartWifiConnected ? "OK" : "OFF";
+  const bool vehicleWifiOnline = WiFi.isConnected();
+  const bool cameraWifiOnline = cameraUartOnline && cameraUartWifiConnected;
+  const bool wifiSynced =
+    vehicleWifiOnline &&
+    cameraWifiOnline &&
+    cameraUartSsid.length() > 0 &&
+    WiFi.SSID() == cameraUartSsid;
+  const int panOffset = panDeg - SERVO_PAN_CENTER;
+  const int tiltOffset = tiltDeg - SERVO_TILT_CENTER;
 
   oled.clearDisplay();
   oled.setTextColor(SSD1306_WHITE);
@@ -263,48 +301,37 @@ void updateOled(bool force) {
   oled.setCursor(0, 0);
   oled.print("FPV ");
   oled.print(MOTOR_DRIVER_NAME);
-  oled.setCursor(98, 0);
-  oled.print(wsConnected ? "V+" : "V-");
-  oled.print(cameraUartOnline ? " C+" : " C-");
+  oled.setCursor(92, 0);
+  oled.print(wifiSynced ? "SYNC+" : "SYNC-");
   oled.drawFastHLine(0, 9, OLED_WIDTH, SSD1306_WHITE);
 
   oled.setCursor(0, 12);
-  oled.print("WIFI  V:");
-  oled.print(vehicleWifiState);
-  oled.print(" C:");
-  oled.println(cameraWifiState);
-  oled.setCursor(0, 21);
-  oled.print("V: ");
-  oled.println(oledFit(wifiLabel, 18));
-  oled.setCursor(0, 30);
-  oled.print("C: ");
-  oled.println(
-    cameraUartOnline && cameraUartWifiConnected
-      ? oledFit(cameraUartSsid, 18)
-      : String("OFF")
-  );
-  oled.setCursor(0, 39);
-  oled.print("CLOUD V:");
-  oled.print(wsConnected ? "ON" : "OFF");
-  oled.print(" C:");
-  oled.println(cameraLabel);
-  oled.setCursor(0, 48);
+  oled.print(setupApActive ? "SETUP " : "WIFI  ");
+  oled.print(oledFit(wifiLabel, 15));
+
+  oledDrawDeviceTile(0, "CAR", vehicleWifiOnline, wsConnected);
+  oledDrawDeviceTile(66, "CAM", cameraWifiOnline, cameraUartCloudConnected);
+
+  oled.setCursor(0, 43);
   oled.print("BAT ");
-  oled.drawRect(25, 48, 38, 8, SSD1306_WHITE);
-  oled.fillRect(27, 50, (battery * 34) / 100, 4, SSD1306_WHITE);
-  oled.setCursor(68, 48);
+  oled.drawRect(24, 43, 38, 8, SSD1306_WHITE);
+  oled.fillRect(26, 45, (battery * 34) / 100, 4, SSD1306_WHITE);
+  oled.setCursor(66, 43);
   oled.print(battery);
-  oled.print("% R");
-  oled.print(vehicleRssi);
-  oled.setCursor(0, 57);
-  oled.print("DRV ");
-  oled.print(oledFit(drive.command, 6));
-  oled.print(" P");
-  oled.print(panDeg - SERVO_PAN_CENTER >= 0 ? "+" : "");
-  oled.print(panDeg - SERVO_PAN_CENTER);
-  oled.print(" T");
-  oled.print(tiltDeg - SERVO_TILT_CENTER >= 0 ? "+" : "");
-  oled.print(tiltDeg - SERVO_TILT_CENTER);
+  oled.print("%");
+  oledDrawSignalBars(108, 51, vehicleRssi);
+
+  oled.drawFastHLine(0, 53, OLED_WIDTH, SSD1306_WHITE);
+  oled.setCursor(0, 56);
+  oled.print(oledDriveLabel(drive.command));
+  oled.setCursor(42, 56);
+  oled.print("P");
+  if (panOffset >= 0) oled.print("+");
+  oled.print(panOffset);
+  oled.setCursor(84, 56);
+  oled.print("T");
+  if (tiltOffset >= 0) oled.print("+");
+  oled.print(tiltOffset);
   oled.display();
 }
 

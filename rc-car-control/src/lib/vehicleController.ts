@@ -203,5 +203,7 @@ export function handleAction(
     }
   }
 
-  sendRaw(buildActionMessage(action, source, payload));
+  const message = buildActionMessage(action, source, payload);
+  sendRaw(message);
+  return message;
 }

@@ -70,6 +70,7 @@ export default function ControllerPage() {
     handleTouchMove,
     handleTouchAction,
     handleSystemAction,
+    handleSystemActionWithAck,
     handleEmergencyStop,
     cameraOrientation,
     cameraOnline,
@@ -180,7 +181,7 @@ export default function ControllerPage() {
   const profileName = telemetry.behaviorProfile?.name || softCodeProfile.name;
 
   const handleSharedWifiChange = async (ssid: string, password: string) => {
-    handleSystemAction("WIFI_SET", { ssid, password });
+    await handleSystemActionWithAck("WIFI_SET", { ssid, password });
   };
 
   const controlGuide = [
@@ -439,30 +440,30 @@ export default function ControllerPage() {
         cameraWifiGateway={cameraStreamStatus?.wifiGateway}
         cameraStreamProfile={cameraStreamStatus?.profile ?? "balanced"}
         onChangeCameraStreamProfile={async (profile) => {
-          handleSystemAction("CAMERA_STREAM_PROFILE", { profile });
+          await handleSystemActionWithAck("CAMERA_STREAM_PROFILE", { profile });
         }}
         wifiNetworks={wifiNetworks}
         wifiScanState={wifiScanState}
         wifiScanError={wifiScanError}
         onScanWifi={requestWifiScan}
         onReconnectVehicle={async () => {
-          handleSystemAction("NETWORK_RECONNECT");
+          await handleSystemActionWithAck("NETWORK_RECONNECT");
         }}
         onRebootVehicle={async () => {
-          handleSystemAction("REBOOT");
+          await handleSystemActionWithAck("REBOOT");
         }}
         onOpenWifiPortal={async () => {
-          handleSystemAction("WIFI_PORTAL_OPEN");
+          await handleSystemActionWithAck("WIFI_PORTAL_OPEN");
         }}
         softCodeProfile={softCodeProfile}
         onApplySoftCodeProfile={async (profile) => {
           const normalized = normalizeSoftCodeProfile(profile);
+          await handleSystemActionWithAck("PROFILE_APPLY", { profile: normalized });
           setSoftCodeProfile(normalized);
-          handleSystemAction("PROFILE_APPLY", { profile: normalized });
         }}
         onResetSoftCodeProfile={async () => {
+          await handleSystemActionWithAck("PROFILE_APPLY", { profile: DEFAULT_SOFT_CODE_PROFILE });
           setSoftCodeProfile(DEFAULT_SOFT_CODE_PROFILE);
-          handleSystemAction("PROFILE_APPLY", { profile: DEFAULT_SOFT_CODE_PROFILE });
         }}
         tuning={tuning}
         onChangeTuning={setTuning}

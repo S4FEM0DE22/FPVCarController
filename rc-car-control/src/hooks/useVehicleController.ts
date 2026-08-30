@@ -364,6 +364,7 @@ export default function useVehicleController() {
     pendingAckCount,
     lastPongAgeMs,
     sendRaw,
+    waitForAck,
   } = useVehicleSocket({
     onMessage: handleSocketMessage,
     onCameraFrame: handleBinaryCameraFrame,
@@ -436,7 +437,7 @@ export default function useVehicleController() {
         pendingCameraUntilRef.current = Date.now() + CAMERA_CONFIRM_TIMEOUT_MS;
       }
 
-      handleVehicleAction(
+      return handleVehicleAction(
         {
           setLastCommand,
           setLastAction: setLastActionWithTimestamp,
@@ -509,6 +510,14 @@ export default function useVehicleController() {
       handleAction(action, CONTROL_SOURCE.system, payload);
     },
     [handleAction]
+  );
+
+  const handleSystemActionWithAck = useCallback(
+    (action: ActionCommand, payload?: Record<string, unknown>) => {
+      const message = handleAction(action, CONTROL_SOURCE.system, payload);
+      return waitForAck(message.commandId);
+    },
+    [handleAction, waitForAck]
   );
 
   const requestWifiScan = useCallback(() => {
@@ -631,6 +640,7 @@ export default function useVehicleController() {
     handleTouchMove,
     handleTouchAction,
     handleSystemAction,
+    handleSystemActionWithAck,
     requestWifiScan,
     handleEmergencyStop,
   };
