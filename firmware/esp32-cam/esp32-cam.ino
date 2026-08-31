@@ -57,20 +57,29 @@ bool cameraReady = false;
 bool cameraHasPsram = false;
 bool flashOn = false;
 bool wsConnected = false;
+bool webSocketStarted = false;
+bool runtimeServicesStarted = false;
 bool cloudMotionMode = false;
 bool wifiSwitchPending = false;
 unsigned long wifiSwitchAt = 0;
 bool wifiSwitchInProgress = false;
 unsigned long wifiSwitchStartedAt = 0;
-const unsigned long WIFI_SWITCH_TIMEOUT_MS = 25000;
+unsigned long lastWifiSwitchRetryAt = 0;
+const unsigned long WIFI_SWITCH_TIMEOUT_MS = 40000;
+const unsigned long WIFI_SWITCH_RETRY_INTERVAL_MS = 8000;
 const unsigned long WIFI_RECONNECT_GRACE_MS = 2000;
 const unsigned long WIFI_RECONNECT_INTERVAL_MS = 10000;
 unsigned long wifiDisconnectedAt = 0;
 unsigned long lastWifiReconnectAttemptAt = 0;
 unsigned long lastFrameAt = 0;
+unsigned long lastCloudFrameSentAt = 0;
 unsigned long cloudMotionUntil = 0;
 unsigned long lastStatusAt = 0;
 unsigned long lastCloudFrameErrorLogAt = 0;
+unsigned long lastCameraRecoveryAt = 0;
+uint8_t consecutiveFrameCaptureFailures = 0;
+const unsigned long CAMERA_RECOVERY_INTERVAL_MS = 12000;
+const uint8_t CAMERA_FRAME_FAILURE_LIMIT = 5;
 uint32_t cloudFramesSent = 0;
 uint32_t cloudFrameAcks = 0;
 uint32_t cloudFrameAckTimeouts = 0;
@@ -100,12 +109,14 @@ bool wifiTransactionPrepared = false;
 bool wifiTransactionArmed = false;
 bool wifiCandidateConnected = false;
 bool wifiFallbackInProgress = false;
-bool wifiCandidateStatusSent = false;
 unsigned long wifiTransactionStartedAt = 0;
-const unsigned long WIFI_COMMIT_TIMEOUT_MS = 60000;
+const unsigned long WIFI_COORDINATOR_TIMEOUT_MS = 60000;
 String vehicleUartBuffer = "";
 bool uartProvisionReceived = false;
 unsigned long uartProvisionRestartAt = 0;
+bool vehicleConfigSyncReceived = false;
+bool vehicleConfigSyncAvailable = false;
+String vehicleConfigSyncRequestId = "";
 String lastCommittedWifiCommandId = "";
 String lastCommittedWifiSsid = "";
 unsigned long lastVehicleUartStatusAt = 0;
@@ -352,6 +363,30 @@ bool setupCamera() {
   return true;
 }
 
+bool setupCameraWithRetry(uint8_t maxAttempts) {
+  for (uint8_t attempt = 1; attempt <= maxAttempts; attempt++) {
+    cameraSensor = nullptr;
+    if (attempt > 1) {
+      esp_camera_deinit();
+      delay(150);
+    }
+
+    pinMode(PWDN_GPIO_NUM, OUTPUT);
+    digitalWrite(PWDN_GPIO_NUM, HIGH);
+    delay(120);
+    digitalWrite(PWDN_GPIO_NUM, LOW);
+    delay(280);
+
+    Serial.printf("Camera init attempt %u/%u\n", attempt, maxAttempts);
+    if (setupCamera()) {
+      consecutiveFrameCaptureFailures = 0;
+      return true;
+    }
+    delay(700);
+  }
+  return false;
+}
+
 void sendRedirectToControl() {
   String url = controlUrlWithCamera();
   Serial.print("Redirecting to controller: ");
@@ -495,43 +530,10 @@ void clearWifiTransaction() {
   wifiTransactionArmed = false;
   wifiCandidateConnected = false;
   wifiFallbackInProgress = false;
-  wifiCandidateStatusSent = false;
   wifiTransactionStartedAt = 0;
   wifiSwitchPending = false;
   wifiSwitchInProgress = false;
   clearPersistedWifiCandidate();
-}
-
-void sendWifiPhase(const char *phase, bool ok, const String &message) {
-  if (!wsConnected || wifiTransactionCommandId.length() == 0) return;
-  JsonDocument doc;
-  doc["type"] = "wifi_phase_ack";
-  doc["vehicleId"] = config.vehicleId;
-  doc["commandId"] = wifiTransactionCommandId;
-  doc["phase"] = phase;
-  doc["ok"] = ok;
-  doc["ssid"] = wifiCandidateSsid;
-  doc["message"] = message;
-  doc["timestamp"] = millis();
-  String payload;
-  serializeJson(doc, payload);
-  webSocket.sendTXT(payload);
-}
-
-void sendWifiCandidateStatus(const char *state, const String &message) {
-  if (!wsConnected || wifiTransactionCommandId.length() == 0) return;
-  JsonDocument doc;
-  doc["type"] = "wifi_candidate_status";
-  doc["vehicleId"] = config.vehicleId;
-  doc["commandId"] = wifiTransactionCommandId;
-  doc["state"] = state;
-  doc["ssid"] = WiFi.isConnected() ? WiFi.SSID() : "";
-  doc["gateway"] = WiFi.isConnected() ? WiFi.gatewayIP().toString() : "";
-  doc["message"] = message;
-  doc["timestamp"] = millis();
-  String payload;
-  serializeJson(doc, payload);
-  webSocket.sendTXT(payload);
 }
 
 void restoreActiveWifi(const char *reason) {
@@ -542,54 +544,8 @@ void restoreActiveWifi(const char *reason) {
   strlcpy(config.wifiPass, wifiActivePass.c_str(), sizeof(config.wifiPass));
   wifiFallbackInProgress = true;
   wifiCandidateConnected = false;
-  wifiCandidateStatusSent = false;
   wifiSwitchPending = true;
   wifiSwitchAt = millis() + 300;
-}
-
-void prepareWifiCandidate(JsonObject payload, const char *commandId) {
-  String ssid = payload["ssid"] | "";
-  String password = payload["password"] | "";
-  if (ssid.length() == 0 || !commandId || strlen(commandId) == 0) return;
-
-  clearWifiTransaction();
-  wifiTransactionCommandId = commandId;
-  wifiCandidateSsid = ssid;
-  wifiCandidatePass = password;
-  wifiActiveSsid = config.wifiSsid;
-  wifiActivePass = config.wifiPass;
-  wifiTransactionPrepared = true;
-  wifiTransactionStartedAt = millis();
-  persistWifiCandidate("prepared");
-  sendWifiPhase("prepared", true, "camera stored WiFi candidate");
-  sendDeviceLog("info", "WiFi candidate prepared; active WiFi unchanged");
-}
-
-void armWifiCandidate(const char *commandId) {
-  if (!wifiTransactionPrepared || !commandId || wifiTransactionCommandId != commandId) return;
-  wifiTransactionArmed = true;
-  wifiTransactionStartedAt = millis();
-  persistWifiCandidate("armed");
-  sendWifiPhase("armed", true, "camera ready for coordinated switch");
-  wifiSwitchPending = true;
-  wifiSwitchAt = millis() + 3000;
-}
-
-void commitWifiCandidate(const char *commandId) {
-  if (!wifiCandidateConnected || !commandId || wifiTransactionCommandId != commandId) return;
-  saveConfig();
-  sendWifiPhase("committed", true, "camera committed active WiFi");
-  clearWifiTransaction();
-}
-
-void rollbackWifiCandidate(const char *commandId, const char *reason) {
-  if (!commandId || wifiTransactionCommandId != commandId) return;
-  if (wifiCandidateConnected || wifiSwitchInProgress || wifiTransactionArmed) {
-    restoreActiveWifi(reason);
-    return;
-  }
-  sendWifiPhase("rolled_back", true, reason);
-  clearWifiTransaction();
 }
 
 void sendVehicleUartDocument(JsonDocument &doc) {
@@ -607,8 +563,24 @@ void sendVehicleUartStatus(bool force) {
   doc["type"] = "camera_status";
   doc["wifiConnected"] = WiFi.isConnected();
   doc["cloudConnected"] = wsConnected;
+  doc["cameraReady"] = cameraReady;
+  doc["streamActive"] =
+    cameraReady &&
+    wsConnected &&
+    lastCloudFrameSentAt > 0 &&
+    now - lastCloudFrameSentAt < 5000;
   doc["rssi"] = WiFi.isConnected() ? WiFi.RSSI() : -100;
   doc["ssid"] = WiFi.isConnected() ? WiFi.SSID() : "";
+  doc["wifiState"] = wifiFallbackInProgress
+    ? "rollback"
+    : (wifiSwitchPending || wifiSwitchInProgress)
+      ? "switching"
+      : wifiCandidateConnected
+        ? "candidate"
+        : wifiTransactionPrepared
+          ? "prepared"
+          : "idle";
+  doc["targetSsid"] = wifiCandidateSsid;
   sendVehicleUartDocument(doc);
 }
 
@@ -655,6 +627,84 @@ bool applyUartProvision(JsonDocument &doc) {
   uartProvisionRestartAt = millis() + 700;
   Serial.print("Provision saved from vehicle UART: SSID=");
   Serial.println(config.wifiSsid);
+  return true;
+}
+
+void sendVehicleConfigSyncAck(bool ok, bool changed, const String &message) {
+  JsonDocument ack;
+  ack["type"] = "config_sync_ack";
+  ack["requestId"] = vehicleConfigSyncRequestId;
+  ack["ok"] = ok;
+  ack["changed"] = changed;
+  ack["hasConfig"] = vehicleConfigSyncAvailable;
+  ack["ssid"] = vehicleConfigSyncAvailable ? String(config.wifiSsid) : "";
+  ack["message"] = message;
+  sendVehicleUartDocument(ack);
+}
+
+bool applyVehicleConfigSync(JsonDocument &doc) {
+  String requestId = doc["requestId"] | "";
+  if (
+    requestId.length() == 0 ||
+    requestId != vehicleConfigSyncRequestId
+  ) {
+    return false;
+  }
+
+  const bool hasConfig = doc["hasConfig"] | false;
+  String ssid = doc["ssid"] | "";
+  if (hasConfig && ssid.length() == 0) {
+    sendVehicleConfigSyncAck(false, false, "vehicle sync omitted WiFi SSID");
+    return false;
+  }
+
+  bool changed = false;
+  if (!hasConfig) {
+    changed = strlen(config.wifiSsid) > 0 || strlen(config.wifiPass) > 0;
+    config.wifiSsid[0] = '\0';
+    config.wifiPass[0] = '\0';
+  } else {
+    const char *password = doc["password"] | "";
+    const char *wsScheme = doc["wsScheme"] | config.wsScheme;
+    const char *wsHost = doc["wsHost"] | config.wsHost;
+    const char *wsPort = doc["wsPort"] | config.wsPort;
+    const char *wsPath = doc["wsPath"] | config.wsPath;
+    const char *vehicleId = doc["vehicleId"] | config.vehicleId;
+    const char *authToken = doc["authToken"] | config.authToken;
+    const char *controlUrl = doc["controlUrl"] | config.controlUrl;
+
+    changed =
+      String(config.wifiSsid) != ssid ||
+      strcmp(config.wifiPass, password) != 0 ||
+      strcmp(config.wsScheme, wsScheme) != 0 ||
+      strcmp(config.wsHost, wsHost) != 0 ||
+      strcmp(config.wsPort, wsPort) != 0 ||
+      strcmp(config.wsPath, wsPath) != 0 ||
+      strcmp(config.vehicleId, vehicleId) != 0 ||
+      strcmp(config.authToken, authToken) != 0 ||
+      strcmp(config.controlUrl, controlUrl) != 0;
+
+    strlcpy(config.wifiSsid, ssid.c_str(), sizeof(config.wifiSsid));
+    strlcpy(config.wifiPass, password, sizeof(config.wifiPass));
+    strlcpy(config.wsScheme, wsScheme, sizeof(config.wsScheme));
+    strlcpy(config.wsHost, wsHost, sizeof(config.wsHost));
+    strlcpy(config.wsPort, wsPort, sizeof(config.wsPort));
+    strlcpy(config.wsPath, wsPath, sizeof(config.wsPath));
+    strlcpy(config.vehicleId, vehicleId, sizeof(config.vehicleId));
+    strlcpy(config.authToken, authToken, sizeof(config.authToken));
+    strlcpy(config.controlUrl, controlUrl, sizeof(config.controlUrl));
+  }
+
+  vehicleConfigSyncAvailable = hasConfig;
+  vehicleConfigSyncReceived = true;
+  if (changed) saveConfig();
+  sendVehicleConfigSyncAck(
+    true,
+    changed,
+    hasConfig ? "camera synchronized vehicle configuration" : "camera cleared stale WiFi cache"
+  );
+  Serial.print("Vehicle configuration sync received: ");
+  Serial.println(hasConfig ? config.wifiSsid : "no saved WiFi");
   return true;
 }
 
@@ -760,8 +810,25 @@ void handleVehicleWifiAction(JsonDocument &doc) {
     clearWifiTransaction();
   } else if (action == "rollback") {
     String reason = doc["reason"] | "vehicle requested rollback";
+    if (wifiFallbackInProgress) {
+      sendVehicleWifiAck(
+        commandId,
+        "rollback_started",
+        true,
+        wifiCandidateSsid,
+        "camera rollback already active"
+      );
+      return;
+    }
     if (wifiCandidateConnected || wifiSwitchInProgress || wifiTransactionArmed) {
       restoreActiveWifi(reason.c_str());
+      sendVehicleWifiAck(
+        commandId,
+        "rollback_started",
+        true,
+        wifiCandidateSsid,
+        "camera rollback started"
+      );
     } else {
       sendVehicleWifiAck(commandId, "rolled_back", true, wifiCandidateSsid, reason);
       clearWifiTransaction();
@@ -780,6 +847,8 @@ void handleVehicleUartLine(const String &line) {
   const char *type = doc["type"] | "";
   if (strcmp(type, "provision") == 0) {
     applyUartProvision(doc);
+  } else if (strcmp(type, "config_sync") == 0) {
+    applyVehicleConfigSync(doc);
   } else if (strcmp(type, "wifi_action") == 0) {
     handleVehicleWifiAction(doc);
   }
@@ -801,6 +870,41 @@ void processVehicleUart() {
     } else {
       vehicleUartBuffer = "";
     }
+  }
+}
+
+void requestVehicleConfigSync() {
+  JsonDocument doc;
+  doc["type"] = "config_request";
+  doc["requestId"] = vehicleConfigSyncRequestId;
+  doc["cachedSsid"] = config.wifiSsid;
+  sendVehicleUartDocument(doc);
+}
+
+void syncConfigFromVehicle(unsigned long timeoutMs) {
+  const uint32_t chipSuffix = (uint32_t)(ESP.getEfuseMac() & 0xFFFFFF);
+  vehicleConfigSyncRequestId =
+    String("boot-") + String(chipSuffix, HEX) + "-" + String(millis());
+  vehicleConfigSyncReceived = false;
+  vehicleConfigSyncAvailable = false;
+
+  Serial.println("Requesting authoritative configuration from vehicle UART...");
+  const unsigned long startedAt = millis();
+  unsigned long lastRequestAt = 0;
+  while (
+    !vehicleConfigSyncReceived &&
+    millis() - startedAt < timeoutMs
+  ) {
+    if (lastRequestAt == 0 || millis() - lastRequestAt >= 500) {
+      requestVehicleConfigSync();
+      lastRequestAt = millis();
+    }
+    processVehicleUart();
+    delay(10);
+  }
+
+  if (!vehicleConfigSyncReceived) {
+    Serial.println("Vehicle config sync unavailable; using last-known-good cache.");
   }
 }
 
@@ -959,10 +1063,21 @@ void sendCloudFrame() {
 
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
+    consecutiveFrameCaptureFailures++;
     Serial.println("Cloud frame skipped: frame buffer unavailable");
     sendCloudFrameErrorLog("Cloud frame skipped: frame buffer unavailable");
+    if (consecutiveFrameCaptureFailures >= CAMERA_FRAME_FAILURE_LIMIT) {
+      Serial.println("Camera frame buffer stalled. Scheduling camera recovery...");
+      sendDeviceLog("error", "Camera frame buffer stalled; starting recovery");
+      cameraReady = false;
+      cameraSensor = nullptr;
+      esp_camera_deinit();
+      lastCameraRecoveryAt = 0;
+      consecutiveFrameCaptureFailures = 0;
+    }
     return;
   }
+  consecutiveFrameCaptureFailures = 0;
 
   const size_t frameBytes = fb->len;
   const uint32_t frameId = cloudFrameSequence + 1;
@@ -972,6 +1087,7 @@ void sendCloudFrame() {
   if (sent) {
     cloudFrameSequence = frameId;
     trackPendingCloudFrameAck(frameId, millis());
+    lastCloudFrameSentAt = millis();
     lastCloudFrameBytes = frameBytes;
     cloudFramesSent++;
   } else {
@@ -982,9 +1098,7 @@ void sendCloudFrame() {
 void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   if (type == WStype_CONNECTED) {
     wsConnected = true;
-    if (wifiCandidateConnected || wifiFallbackInProgress) {
-      wifiCandidateStatusSent = false;
-    }
+    lastCloudFrameSentAt = 0;
     cloudFrameSequence = 0;
     clearPendingCloudFrameAcks();
     Serial.print("Camera WebSocket connected: ");
@@ -1053,16 +1167,7 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
     if (strcmp(messageType, "action") == 0) {
       const char *action = doc["action"] | "";
       const char *commandId = doc["commandId"] | "";
-      JsonObject actionPayload = doc["payload"].as<JsonObject>();
-      if (strcmp(action, "WIFI_PREPARE") == 0) {
-        prepareWifiCandidate(actionPayload, commandId);
-      } else if (strcmp(action, "WIFI_APPLY") == 0) {
-        armWifiCandidate(commandId);
-      } else if (strcmp(action, "WIFI_COMMIT") == 0) {
-        commitWifiCandidate(commandId);
-      } else if (strcmp(action, "WIFI_ROLLBACK") == 0) {
-        rollbackWifiCandidate(commandId, "relay requested rollback");
-      } else if (strcmp(action, "NETWORK_RECONNECT") == 0) {
+      if (strcmp(action, "NETWORK_RECONNECT") == 0) {
         WiFi.reconnect();
       } else if (strcmp(action, "WIFI_PORTAL_OPEN") == 0) {
         sendDeviceLog("info", "Restarting camera for shared WiFi setup");
@@ -1113,6 +1218,16 @@ void setupWebSocket() {
   webSocket.onEvent(onWebSocketEvent);
   webSocket.setReconnectInterval(2500);
   webSocket.enableHeartbeat(15000, 3000, 2);
+  webSocketStarted = true;
+}
+
+void resetCloudConnectionForWifiChange() {
+  if (!webSocketStarted && !wsConnected) return;
+  Serial.println("Resetting camera WebSocket for WiFi change...");
+  webSocket.disconnect();
+  webSocketStarted = false;
+  wsConnected = false;
+  clearPendingCloudFrameAcks();
 }
 
 void setupRoutes() {
@@ -1155,6 +1270,7 @@ void stopStaConnectionAttempt() {
 }
 
 void beginStaConnection(const char *ssid, const char *password, bool autoReconnect) {
+  resetCloudConnectionForWifiChange();
   stopStaConnectionAttempt();
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
@@ -1221,6 +1337,10 @@ void maintainWiFiConnection(unsigned long now) {
     }
     wifiDisconnectedAt = 0;
     lastWifiReconnectAttemptAt = 0;
+    if (runtimeServicesStarted && !webSocketStarted) {
+      Serial.println("WiFi restored. Restarting camera WebSocket...");
+      setupWebSocket();
+    }
     return;
   }
 
@@ -1246,19 +1366,37 @@ void maintainWiFiConnection(unsigned long now) {
   beginStaConnection(config.wifiSsid, config.wifiPass, true);
 }
 
+void maintainCamera(unsigned long now) {
+  if (
+    cameraReady ||
+    WiFi.status() != WL_CONNECTED ||
+    wifiSwitchPending ||
+    wifiSwitchInProgress ||
+    wifiFallbackInProgress ||
+    (lastCameraRecoveryAt > 0 && now - lastCameraRecoveryAt < CAMERA_RECOVERY_INTERVAL_MS)
+  ) {
+    return;
+  }
+
+  lastCameraRecoveryAt = now;
+  Serial.println("Camera is not ready. Starting automatic recovery...");
+  cameraReady = setupCameraWithRetry(2);
+  if (cameraReady) {
+    Serial.println("Camera automatic recovery succeeded.");
+    sendDeviceLog("info", "Camera recovered without reboot");
+    sendCameraStreamStatus();
+    sendVehicleUartStatus(true);
+  } else {
+    Serial.println("Camera automatic recovery failed; retrying later.");
+    sendDeviceLog("error", "Camera recovery failed; retry scheduled");
+  }
+}
+
 void setupWiFiManager() {
   if (connectToConfiguredWiFi(18000)) return;
 
-  Serial.println("Saved WiFi unavailable. Waiting for vehicle UART provisioning.");
-  while (!uartProvisionReceived) {
-    processVehicleUart();
-    sendVehicleUartStatus();
-    delay(10);
-  }
-
-  Serial.println("UART provisioning saved. Restarting camera on the new WiFi...");
-  delay(800);
-  ESP.restart();
+  Serial.println("Saved WiFi unavailable. Continuing in offline recovery mode.");
+  Serial.println("Camera will keep retrying WiFi and accepting vehicle UART commands.");
 }
 
 void setup() {
@@ -1285,10 +1423,13 @@ void setup() {
   if (!isValidCloudStreamProfile(config.streamProfile)) {
     strlcpy(config.streamProfile, "balanced", sizeof(config.streamProfile));
   }
+  syncConfigFromVehicle(8000);
   setupWiFiManager();
-  cameraReady = setupCamera();
+  cameraReady = setupCameraWithRetry(3);
+  lastCameraRecoveryAt = millis();
   setupRoutes();
   setupWebSocket();
+  runtimeServicesStarted = true;
   printCameraConfig();
   Serial.println(cameraReady ? "ESP32-CAM ready" : "ESP32-CAM web server ready, camera failed");
 }
@@ -1315,6 +1456,7 @@ void loop() {
     wifiSwitchPending = false;
     wifiSwitchInProgress = true;
     wifiSwitchStartedAt = millis();
+    lastWifiSwitchRetryAt = wifiSwitchStartedAt;
     if (wifiTransactionArmed && !wifiFallbackInProgress) {
       strlcpy(config.wifiSsid, wifiCandidateSsid.c_str(), sizeof(config.wifiSsid));
       strlcpy(config.wifiPass, wifiCandidatePass.c_str(), sizeof(config.wifiPass));
@@ -1323,7 +1465,8 @@ void loop() {
     beginStaConnection(config.wifiSsid, config.wifiPass, true);
   }
 
-  maintainWiFiConnection(millis());
+  maintainWiFiConnection(now);
+  maintainCamera(now);
   sendCloudFrame();
 
   if (wifiSwitchInProgress) {
@@ -1338,7 +1481,6 @@ void loop() {
       } else if (wifiTransactionArmed) {
         wifiCandidateConnected = true;
       }
-      wifiCandidateStatusSent = false;
     } else if (millis() - wifiSwitchStartedAt > WIFI_SWITCH_TIMEOUT_MS) {
       wifiSwitchInProgress = false;
       if (!wifiFallbackInProgress && wifiTransactionArmed) {
@@ -1347,28 +1489,25 @@ void loop() {
         Serial.println("Active WiFi recovery failed. Restarting...");
         ESP.restart();
       }
+    } else if (millis() - lastWifiSwitchRetryAt >= WIFI_SWITCH_RETRY_INTERVAL_MS) {
+      lastWifiSwitchRetryAt = millis();
+      Serial.print("Retrying WiFi switch: ");
+      Serial.println(config.wifiSsid);
+      beginStaConnection(config.wifiSsid, config.wifiPass, true);
     }
-  }
-  if (wifiCandidateConnected && wsConnected && !wifiCandidateStatusSent) {
-    sendWifiCandidateStatus("connected", "camera reached cloud through candidate WiFi");
-    wifiCandidateStatusSent = true;
   }
   if (
     wifiFallbackInProgress &&
-    WiFi.status() == WL_CONNECTED &&
-    wsConnected &&
-    !wifiCandidateStatusSent
+    WiFi.status() == WL_CONNECTED
   ) {
-    sendWifiCandidateStatus("rolled_back", "camera restored active WiFi");
-    wifiCandidateStatusSent = true;
     clearWifiTransaction();
   }
   if (
     wifiTransactionArmed &&
     !wifiFallbackInProgress &&
-    now - wifiTransactionStartedAt > WIFI_COMMIT_TIMEOUT_MS
+    now - wifiTransactionStartedAt > WIFI_COORDINATOR_TIMEOUT_MS
   ) {
-    restoreActiveWifi("cloud commit timed out");
+    restoreActiveWifi("vehicle coordinator timed out");
   }
   if (cloudMotionMode && (long)(now - cloudMotionUntil) >= 0) {
     setCloudMotionMode(false);

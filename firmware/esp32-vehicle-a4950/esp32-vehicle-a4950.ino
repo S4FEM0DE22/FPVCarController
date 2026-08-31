@@ -119,8 +119,12 @@ bool wifiResetButtonPressed = false;
 bool wifiResetButtonHandled = false;
 bool cameraUartWifiConnected = false;
 bool cameraUartCloudConnected = false;
+bool cameraUartReady = false;
+bool cameraUartStreamActive = false;
 int cameraUartRssi = -100;
 String cameraUartSsid = "";
+String cameraUartWifiState = "";
+String cameraUartTargetSsid = "";
 float lastBatteryPercent = 0;
 unsigned long camAckAt = 0;
 const unsigned long CAM_ACK_TIMEOUT_MS = 120000; // wait up to 2 minutes for camera
@@ -149,7 +153,11 @@ bool wifiUartCameraPrepared = false;
 bool wifiUartCameraArmed = false;
 bool wifiUartCameraSwitchScheduled = false;
 bool wifiUartCameraCommitted = false;
+bool wifiUartCameraRollbackStarted = false;
 bool wifiVehicleCommitted = false;
+String wifiRollbackReason = "";
+String wifiCoordinatorState = "idle";
+String wifiCoordinatorMessage = "";
 String wifiResetCommandId = "";
 bool wifiResetCameraAcked = false;
 unsigned long wifiTransactionStartedAt = 0;
@@ -205,31 +213,22 @@ const char *oledDriveLabel(const String &command) {
   return "STOP";
 }
 
-void oledDrawSignalBars(int x, int bottom, int rssi) {
-  int bars = rssi >= -55 ? 4 : rssi >= -67 ? 3 : rssi >= -78 ? 2 : rssi > -100 ? 1 : 0;
-  for (int i = 0; i < 4; i++) {
-    int height = 2 + (i * 2);
-    int y = bottom - height;
-    if (i < bars) {
-      oled.fillRect(x + (i * 5), y, 3, height, SSD1306_WHITE);
-    } else {
-      oled.drawRect(x + (i * 5), y, 3, height, SSD1306_WHITE);
-    }
-  }
+void oledPrintRight(const String &value, int y) {
+  const int width = value.length() * 6;
+  oled.setCursor(max(0, OLED_WIDTH - width), y);
+  oled.print(value);
 }
 
-void oledDrawDeviceTile(
-  int x,
-  const char *name,
-  bool wifiOnline,
-  bool cloudOnline
-) {
-  oled.drawRoundRect(x, 22, 62, 18, 2, SSD1306_WHITE);
-  oled.setCursor(x + 4, 24);
-  oled.print(name);
-  oled.setCursor(x + 4, 32);
-  oled.print(wifiOnline ? "NET+" : "NET-");
-  oled.print(cloudOnline ? " CLD+" : " CLD-");
+void oledDrawBatteryBar(int percent) {
+  const int x = 44;
+  const int y = 42;
+  const int width = 54;
+  const int height = 7;
+  oled.drawRect(x, y, width, height, SSD1306_WHITE);
+  const int fillWidth = ((width - 4) * percent) / 100;
+  if (fillWidth > 0) {
+    oled.fillRect(x + 2, y + 2, fillWidth, height - 4, SSD1306_WHITE);
+  }
 }
 
 void initOled() {
@@ -241,12 +240,17 @@ void initOled() {
   }
 
   oled.clearDisplay();
-  oled.setTextColor(SSD1306_WHITE);
   oled.setTextSize(1);
-  oled.setCursor(0, 0);
-  oled.println("FPV CAR");
-  oled.println();
+  oled.fillRect(0, 0, OLED_WIDTH, 10, SSD1306_WHITE);
+  oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+  oled.setCursor(1, 1);
+  oled.print("FPV CAR");
+  oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0, 20);
   oled.println("Starting systems...");
+  oled.setCursor(0, 34);
+  oled.print("Driver: ");
+  oled.print(MOTOR_DRIVER_NAME);
   oled.display();
   Serial.println("OLED ready: SSD1306 128x64 address=0x3C SDA=21 SCL=22");
 }
@@ -254,13 +258,18 @@ void initOled() {
 void showOledMessage(const String &title, const String &detail) {
   if (!oledReady) return;
   oled.clearDisplay();
-  oled.setTextColor(SSD1306_WHITE);
   oled.setTextSize(1);
-  oled.setCursor(0, 8);
-  oled.println(oledFit(title, 21));
-  oled.drawFastHLine(0, 20, OLED_WIDTH, SSD1306_WHITE);
-  oled.setCursor(0, 30);
-  oled.println(oledFit(detail, 21));
+  oled.fillRect(0, 0, OLED_WIDTH, 10, SSD1306_WHITE);
+  oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+  oled.setCursor(1, 1);
+  oled.print(oledFit(title, 21));
+  oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0, 18);
+  oled.print(oledFit(detail.substring(0, 21), 21));
+  if (detail.length() > 21) {
+    oled.setCursor(0, 30);
+    oled.print(oledFit(detail.substring(21), 21));
+  }
   oled.display();
 }
 
@@ -290,44 +299,58 @@ void updateOled(bool force) {
     WiFi.SSID() == cameraUartSsid;
   const int panOffset = panDeg - SERVO_PAN_CENTER;
   const int tiltOffset = tiltDeg - SERVO_TILT_CENTER;
+  const String headerState = setupApActive
+    ? String("SETUP")
+    : wifiSynced
+    ? String("SYNC")
+    : String("CHECK");
+  const String vehicleStatus = String("CAR  WiFi ") +
+    (vehicleWifiOnline ? "OK" : "--") +
+    " Cloud " +
+    (wsConnected ? "OK" : "--");
+  const String cameraStatus = String("CAM  WiFi ") +
+    (cameraWifiOnline ? "OK" : "--") +
+    " Cloud " +
+    (cameraUartCloudConnected && cameraUartReady && cameraUartStreamActive ? "OK" : "--");
+  String driveLine = String(oledDriveLabel(drive.command)) + "  P";
+  if (panOffset >= 0) driveLine += "+";
+  driveLine += String(panOffset);
+  driveLine += "  T";
+  if (tiltOffset >= 0) driveLine += "+";
+  driveLine += String(tiltOffset);
 
   oled.clearDisplay();
-  oled.setTextColor(SSD1306_WHITE);
   oled.setTextSize(1);
-  oled.setCursor(0, 0);
+  oled.fillRect(0, 0, OLED_WIDTH, 10, SSD1306_WHITE);
+  oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+  oled.setCursor(1, 1);
   oled.print("FPV ");
   oled.print(MOTOR_DRIVER_NAME);
-  oled.setCursor(92, 0);
-  oled.print(wifiSynced ? "SYNC+" : "SYNC-");
-  oled.drawFastHLine(0, 9, OLED_WIDTH, SSD1306_WHITE);
+  const int headerStateWidth = headerState.length() * 6;
+  oled.setCursor(max(0, OLED_WIDTH - headerStateWidth - 1), 1);
+  oled.print(headerState);
 
+  oled.setTextColor(SSD1306_WHITE);
   oled.setCursor(0, 12);
-  oled.print(setupApActive ? "SETUP " : "WIFI  ");
-  oled.print(oledFit(wifiLabel, 15));
+  oled.print(setupApActive ? "Setup " : "WiFi  ");
+  oled.print(oledFit(wifiLabel, 10));
+  if (!setupApActive && vehicleWifiOnline) {
+    oledPrintRight(String(vehicleRssi), 12);
+  }
 
-  oledDrawDeviceTile(0, "CAR", vehicleWifiOnline, wsConnected);
-  oledDrawDeviceTile(66, "CAM", cameraWifiOnline, cameraUartCloudConnected);
+  oled.setCursor(0, 22);
+  oled.print(oledFit(vehicleStatus, 21));
+  oled.setCursor(0, 32);
+  oled.print(oledFit(cameraStatus, 21));
 
-  oled.setCursor(0, 43);
+  oled.setCursor(0, 42);
   oled.print("BAT ");
-  oled.drawRect(24, 43, 38, 8, SSD1306_WHITE);
-  oled.fillRect(26, 45, (battery * 34) / 100, 4, SSD1306_WHITE);
-  oled.setCursor(66, 43);
-  oled.print(battery);
-  oled.print("%");
-  oledDrawSignalBars(108, 51, vehicleRssi);
+  oledDrawBatteryBar(battery);
+  oledPrintRight(String(battery) + "%", 42);
 
-  oled.drawFastHLine(0, 53, OLED_WIDTH, SSD1306_WHITE);
-  oled.setCursor(0, 56);
-  oled.print(oledDriveLabel(drive.command));
-  oled.setCursor(42, 56);
-  oled.print("P");
-  if (panOffset >= 0) oled.print("+");
-  oled.print(panOffset);
-  oled.setCursor(84, 56);
-  oled.print("T");
-  if (tiltOffset >= 0) oled.print("+");
-  oled.print(tiltOffset);
+  oled.drawFastHLine(0, 51, OLED_WIDTH, SSD1306_WHITE);
+  oled.setCursor(0, 54);
+  oled.print(oledFit(driveLine, 21));
   oled.display();
 }
 
@@ -588,7 +611,11 @@ void clearWifiTransaction() {
   wifiUartCameraArmed = false;
   wifiUartCameraSwitchScheduled = false;
   wifiUartCameraCommitted = false;
+  wifiUartCameraRollbackStarted = false;
   wifiVehicleCommitted = false;
+  wifiRollbackReason = "";
+  wifiCoordinatorState = "idle";
+  wifiCoordinatorMessage = "";
   wifiTransactionStartedAt = 0;
   wifiTransactionCompletedAt = 0;
   wifiSwitchPending = false;
@@ -596,13 +623,13 @@ void clearWifiTransaction() {
   clearPersistedWifiCandidate();
 }
 
-void sendWifiPhase(const char *phase, bool ok, const String &message) {
+void sendWifiUpdateStatus(const char *state, bool ok, const String &message) {
   if (!wsConnected || wifiTransactionCommandId.length() == 0) return;
   JsonDocument doc;
-  doc["type"] = "wifi_phase_ack";
+  doc["type"] = "wifi_update_status";
   doc["vehicleId"] = config.vehicleId;
   doc["commandId"] = wifiTransactionCommandId;
-  doc["phase"] = phase;
+  doc["state"] = state;
   doc["ok"] = ok;
   doc["ssid"] = wifiCandidateSsid;
   doc["message"] = message;
@@ -610,18 +637,10 @@ void sendWifiPhase(const char *phase, bool ok, const String &message) {
   sendJsonDocument(doc);
 }
 
-void sendWifiCandidateStatus(const char *state, const String &message) {
-  if (!wsConnected || wifiTransactionCommandId.length() == 0) return;
-  JsonDocument doc;
-  doc["type"] = "wifi_candidate_status";
-  doc["vehicleId"] = config.vehicleId;
-  doc["commandId"] = wifiTransactionCommandId;
-  doc["state"] = state;
-  doc["ssid"] = WiFi.isConnected() ? WiFi.SSID() : "";
-  doc["gateway"] = WiFi.isConnected() ? WiFi.gatewayIP().toString() : "";
-  doc["message"] = message;
-  doc["timestamp"] = millis();
-  sendJsonDocument(doc);
+void setWifiCoordinatorState(const char *state, const String &message) {
+  wifiCoordinatorState = state;
+  wifiCoordinatorMessage = message;
+  sendWifiUpdateStatus(state, true, message);
 }
 
 void sendCameraUartDocument(JsonDocument &doc) {
@@ -648,6 +667,27 @@ void sendCameraProvisionUart() {
   sendCameraUartDocument(doc);
 }
 
+void sendCameraConfigSyncUart(const String &requestId) {
+  if (requestId.length() == 0) return;
+  const bool hasConfig = strlen(config.wifiSsid) > 0;
+  JsonDocument doc;
+  doc["type"] = "config_sync";
+  doc["requestId"] = requestId;
+  doc["hasConfig"] = hasConfig;
+  if (hasConfig) {
+    doc["ssid"] = config.wifiSsid;
+    doc["password"] = config.wifiPass;
+    doc["wsScheme"] = config.wsScheme;
+    doc["wsHost"] = config.wsHost;
+    doc["wsPort"] = config.wsPort;
+    doc["wsPath"] = config.wsPath;
+    doc["vehicleId"] = config.vehicleId;
+    doc["authToken"] = config.authToken;
+    doc["controlUrl"] = config.controlUrl;
+  }
+  sendCameraUartDocument(doc);
+}
+
 void sendCameraWifiUart(
   const char *action,
   const String &commandId,
@@ -668,25 +708,6 @@ void sendCameraWifiUart(
   sendCameraUartDocument(doc);
 }
 
-void forwardCameraWifiPhase(
-  const char *phase,
-  bool ok,
-  const String &ssid,
-  const String &message
-) {
-  if (!wsConnected || wifiTransactionCommandId.length() == 0) return;
-  JsonDocument doc;
-  doc["type"] = "wifi_uart_camera_phase";
-  doc["vehicleId"] = config.vehicleId;
-  doc["commandId"] = wifiTransactionCommandId;
-  doc["phase"] = phase;
-  doc["ok"] = ok;
-  doc["ssid"] = ssid;
-  doc["message"] = message;
-  doc["timestamp"] = millis();
-  sendJsonDocument(doc);
-}
-
 void handleCameraUartLine(const String &line) {
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, line);
@@ -697,12 +718,26 @@ void handleCameraUartLine(const String &line) {
   }
 
   const char *type = doc["type"] | "";
+  if (strcmp(type, "config_request") == 0) {
+    String requestId = doc["requestId"] | "";
+    sendCameraConfigSyncUart(requestId);
+    return;
+  }
+  if (strcmp(type, "config_sync_ack") == 0) {
+    Serial.print("ESP32-CAM boot config sync: ");
+    Serial.println((doc["ok"] | false) ? "acknowledged" : "rejected");
+    return;
+  }
   if (strcmp(type, "camera_status") == 0) {
     lastCameraUartStatusAt = millis();
     cameraUartWifiConnected = doc["wifiConnected"] | false;
     cameraUartCloudConnected = doc["cloudConnected"] | false;
+    cameraUartReady = doc["cameraReady"] | false;
+    cameraUartStreamActive = doc["streamActive"] | false;
     cameraUartRssi = doc["rssi"] | -100;
     cameraUartSsid = String(doc["ssid"] | "");
+    cameraUartWifiState = String(doc["wifiState"] | "");
+    cameraUartTargetSsid = String(doc["targetSsid"] | "");
     return;
   }
   if (strcmp(type, "provision_ack") == 0) {
@@ -740,15 +775,29 @@ void handleCameraUartLine(const String &line) {
   if (phase == "armed" && ok) wifiUartCameraArmed = true;
   if (phase == "switching" && ok) wifiUartCameraSwitchScheduled = true;
   if (phase == "committed" && ok) wifiUartCameraCommitted = true;
+  if (phase == "rollback_started" && ok) wifiUartCameraRollbackStarted = true;
   Serial.printf(
     "Camera WiFi UART ACK: phase=%s ok=%s\n",
     phase.c_str(),
     ok ? "yes" : "no"
   );
-  forwardCameraWifiPhase(phase.c_str(), ok, ssid, message);
+  if (!ok) {
+    restoreActiveWifi(message.c_str());
+    return;
+  }
 
-  if (phase == "committed" && ok && wifiVehicleCommitted) {
+  if (phase == "prepared" && !wifiTransactionArmed) {
+    wifiTransactionArmed = true;
+    wifiTransactionStartedAt = millis();
+    persistWifiCandidate("armed");
+    sendCameraWifiUart("arm", wifiTransactionCommandId);
+    setWifiCoordinatorState("preparing", "Camera saved candidate; arming local switch");
+  } else if (phase == "armed" && !wifiSwitchPending && !wifiSwitchInProgress) {
+    setWifiCoordinatorState("switching", "Camera ready; switching both boards");
+    startWifiCandidateSwitch(wifiTransactionCommandId.c_str());
+  } else if (phase == "committed" && wifiVehicleCommitted) {
     wifiTransactionCompletedAt = millis();
+    setWifiCoordinatorState("success", "Vehicle and camera committed the new WiFi");
   }
 }
 
@@ -773,6 +822,19 @@ void processCameraUart() {
 
 void restoreActiveWifi(const char *reason) {
   if (wifiActiveSsid.length() == 0) return;
+  if (wifiFallbackInProgress) return;
+  wifiRollbackReason = reason && strlen(reason) > 0
+    ? String(reason)
+    : String("vehicle requested rollback");
+  wifiUartCameraRollbackStarted = false;
+  if (wifiTransactionCommandId.length() > 0) {
+    sendCameraWifiUart(
+      "rollback",
+      wifiTransactionCommandId,
+      0,
+      wifiRollbackReason.c_str()
+    );
+  }
   Serial.print("Restoring active WiFi: ");
   Serial.println(reason);
   strlcpy(config.wifiSsid, wifiActiveSsid.c_str(), sizeof(config.wifiSsid));
@@ -987,7 +1049,7 @@ void prepareWifiCandidate(JsonObject payload, const char *commandId) {
   String ssid = payloadString(payload, "ssid", "");
   String password = payloadString(payload, "password", "");
   if (ssid.length() == 0 || !commandId || strlen(commandId) == 0) {
-    sendStatus("WIFI_PREPARE ignored: invalid request");
+    sendStatus("WIFI_SET ignored: invalid request");
     return;
   }
 
@@ -999,7 +1061,13 @@ void prepareWifiCandidate(JsonObject payload, const char *commandId) {
     if (!wifiUartCameraPrepared) {
       sendCameraWifiUart("prepare", wifiTransactionCommandId);
     }
-    sendWifiPhase("prepared", true, "vehicle WiFi candidate already prepared");
+    sendWifiUpdateStatus(
+      wifiCoordinatorState.c_str(),
+      true,
+      wifiCoordinatorMessage.length() > 0
+        ? wifiCoordinatorMessage
+        : String("WiFi update already in progress")
+    );
     return;
   }
 
@@ -1013,24 +1081,9 @@ void prepareWifiCandidate(JsonObject payload, const char *commandId) {
   wifiTransactionStartedAt = millis();
   persistWifiCandidate("prepared");
   sendCameraWifiUart("prepare", wifiTransactionCommandId);
-  sendWifiPhase("prepared", true, "vehicle stored WiFi candidate");
+  setWifiCoordinatorState("preparing", "Vehicle accepted WiFi; waiting for camera UART");
   sendStatus("WiFi candidate prepared; waiting for camera UART ACK");
   stopDrive();
-}
-
-void armWifiCandidate(const char *commandId) {
-  if (
-    !wifiTransactionPrepared ||
-    !commandId ||
-    wifiTransactionCommandId != commandId
-  ) {
-    return;
-  }
-  wifiTransactionArmed = true;
-  wifiTransactionStartedAt = millis();
-  persistWifiCandidate("armed");
-  sendCameraWifiUart("arm", wifiTransactionCommandId);
-  sendWifiPhase("armed", true, "vehicle ready for coordinated switch");
 }
 
 void startWifiCandidateSwitch(const char *commandId) {
@@ -1040,12 +1093,11 @@ void startWifiCandidateSwitch(const char *commandId) {
     !commandId ||
     wifiTransactionCommandId != commandId
   ) {
-    sendWifiPhase("switching", false, "camera did not confirm UART arm");
+    restoreActiveWifi("camera did not confirm UART arm");
     return;
   }
 
   if (wifiSwitchPending || wifiSwitchInProgress || wifiCandidateConnected) {
-    sendWifiPhase("switching", true, "coordinated WiFi switch already active");
     return;
   }
 
@@ -1058,7 +1110,6 @@ void startWifiCandidateSwitch(const char *commandId) {
   wifiSwitchPending = true;
   wifiSwitchAt = millis() + WIFI_UART_SWITCH_DELAY_MS;
   wifiTransactionStartedAt = millis();
-  sendWifiPhase("switching", true, "coordinated WiFi switch scheduled over UART");
 }
 
 void commitWifiCandidate(const char *commandId) {
@@ -1074,18 +1125,7 @@ void commitWifiCandidate(const char *commandId) {
   wifiVehicleCommitted = true;
   wifiTransactionStartedAt = millis();
   persistWifiCandidate("committed");
-  sendWifiPhase("committed", true, "vehicle committed active WiFi");
-}
-
-void rollbackWifiCandidate(const char *commandId, const char *reason) {
-  if (!commandId || wifiTransactionCommandId != commandId) return;
-  sendCameraWifiUart("rollback", wifiTransactionCommandId, 0, reason);
-  if (wifiCandidateConnected || wifiSwitchInProgress || wifiTransactionArmed) {
-    restoreActiveWifi(reason);
-    return;
-  }
-  sendWifiPhase("rolled_back", true, reason);
-  clearWifiTransaction();
+  setWifiCoordinatorState("committing", "Both boards verified; saving the new WiFi");
 }
 
 void resetSharedWifi(const char *commandId) {
@@ -1201,16 +1241,8 @@ void handleAction(JsonDocument &doc) {
     applyBehaviorProfile(payload);
   } else if (strcmp(action, "WIFI_SCAN") == 0) {
     startWifiScan(commandId);
-  } else if (strcmp(action, "WIFI_PREPARE") == 0) {
+  } else if (strcmp(action, "WIFI_SET") == 0) {
     prepareWifiCandidate(payload, commandId);
-  } else if (strcmp(action, "WIFI_APPLY") == 0) {
-    armWifiCandidate(commandId);
-  } else if (strcmp(action, "WIFI_SWITCH") == 0) {
-    startWifiCandidateSwitch(commandId);
-  } else if (strcmp(action, "WIFI_COMMIT") == 0) {
-    commitWifiCandidate(commandId);
-  } else if (strcmp(action, "WIFI_ROLLBACK") == 0) {
-    rollbackWifiCandidate(commandId, "relay requested rollback");
   } else if (strcmp(action, "WIFI_PORTAL_OPEN") == 0) {
     Serial.println("Resetting shared WiFi and opening setup portal");
     resetSharedWifi(commandId);
@@ -1221,7 +1253,9 @@ void handleAction(JsonDocument &doc) {
     writeCameraServos();
     printServoTargets();
   }
-  ackCommand(commandId, "action applied by ESP32");
+  if (strcmp(action, "WIFI_SET") != 0) {
+    ackCommand(commandId, "action applied by ESP32");
+  }
   sendStatus("action applied by ESP32");
   sendTelemetry();
 }
@@ -1243,6 +1277,16 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
     sendIdentify();
     sendStatus("ESP32 vehicle connected");
     sendDeviceLog("info", "WebSocket connected");
+    if (
+      wifiTransactionCommandId.length() > 0 &&
+      wifiCoordinatorState != "idle"
+    ) {
+      sendWifiUpdateStatus(
+        wifiCoordinatorState.c_str(),
+        wifiCoordinatorState != "failed",
+        wifiCoordinatorMessage
+      );
+    }
     return;
   }
 
@@ -1352,6 +1396,7 @@ String htmlEscape(const char *value) {
   String escaped = value;
   escaped.replace("&", "&amp;");
   escaped.replace("\"", "&quot;");
+  escaped.replace("'", "&#39;");
   escaped.replace("<", "&lt;");
   escaped.replace(">", "&gt;");
   return escaped;
@@ -1385,22 +1430,24 @@ String wifiOptionsHtml() {
 
 void sendSetupPage() {
   String html;
-  html.reserve(9000);
+  html.reserve(14000);
   html += "<!doctype html><html lang='th'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
   html += "<title>ตั้งค่า FPV Car</title><style>";
-  html += "*{box-sizing:border-box}body{font-family:system-ui,sans-serif;margin:0;background:#eef2f3;color:#172033}header{background:#111827;color:white;padding:22px 20px}header div,main{max-width:680px;margin:auto}h1{font-size:23px;margin:0 0 6px}h2{font-size:16px;margin:0 0 5px}p{margin:0;line-height:1.55}.sub{color:#cbd5e1;font-size:13px}main{padding:18px 14px 36px}.status{border-left:4px solid #10b981;background:#ecfdf5;padding:12px 14px;margin-bottom:14px;border-radius:6px}.section{background:white;border:1px solid #d8e0e5;border-radius:8px;padding:16px;margin-bottom:12px}.title{display:flex;gap:10px;align-items:flex-start}.num{display:grid;place-items:center;flex:0 0 26px;height:26px;border-radius:50%;background:#172033;color:white;font-weight:700;font-size:13px}.hint{color:#64748b;font-size:12px}label{display:block;margin:14px 0 6px;font-size:13px;font-weight:650}input,select{width:100%;padding:12px;border-radius:6px;border:1px solid #cbd5e1;background:white;color:#172033;font-size:16px}input:focus,select:focus{outline:2px solid #34d399;border-color:#059669}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}details{margin-top:12px;border-top:1px solid #e2e8f0;padding-top:12px}summary{cursor:pointer;font-size:13px;font-weight:700}.primary{width:100%;border:0;border-radius:7px;padding:14px;background:#059669;color:white;font-size:15px;font-weight:750}.secondary{display:inline-block;margin-top:10px;color:#475569;font-size:12px}.error{border-left-color:#e11d48;background:#fff1f2;color:#9f1239;margin-bottom:14px}.footer{font-size:11px;color:#64748b;text-align:center;margin-top:18px}@media(max-width:560px){header{padding:18px 16px}.grid{grid-template-columns:1fr}.section{padding:14px}}";
-  html += "</style></head><body><header><div><h1>ตั้งค่า FPV Car</h1><p class='sub'>เลือก Wi-Fi ครั้งเดียว ระบบจะส่งค่าให้ ESP32 และ ESP32-CAM พร้อมกัน</p></div></header><main>";
-  html += "<div class='status'><strong>พร้อมตั้งค่า</strong><p class='hint'>เชื่อมต่ออยู่กับ FPV-Car-Setup · เปิดไฟทั้งสองบอร์ดไว้จนกว่าจะเสร็จ</p></div>";
+  html += "[hidden]{display:none!important}";
+  html += "*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;background:#eef2f3;color:#172033}header{background:#111827;color:white;padding:24px 20px}header div,main{max-width:880px;margin:auto}.eyebrow{font-size:11px;font-weight:750;letter-spacing:.12em;color:#6ee7b7;text-transform:uppercase}h1{font-size:24px;margin:5px 0 6px}h2{font-size:17px;margin:0 0 5px}p{margin:0;line-height:1.55}.sub{color:#cbd5e1;font-size:13px}main{padding:18px 16px 40px}.status{border-left:4px solid #10b981;background:#ecfdf5;padding:12px 14px;margin-bottom:12px;border-radius:6px}.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px}.step{background:#dde5e8;padding:9px 10px;border-radius:6px;font-size:12px;font-weight:700}.step span{display:inline-grid;place-items:center;width:20px;height:20px;margin-right:5px;border-radius:50%;background:#172033;color:white}form{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(260px,.8fr);gap:12px}.section{background:white;border:1px solid #d8e0e5;border-radius:8px;padding:17px}.network{grid-row:span 2}.title{display:flex;gap:10px;align-items:flex-start}.num{display:grid;place-items:center;flex:0 0 26px;height:26px;border-radius:50%;background:#172033;color:white;font-weight:700;font-size:13px}.hint{color:#64748b;font-size:12px}label{display:block;margin:14px 0 6px;font-size:13px;font-weight:700}input,select,button{font:inherit}input,select{width:100%;min-height:48px;padding:11px 12px;border-radius:6px;border:1px solid #b8c5ce;background:white;color:#172033;font-size:16px}input:focus,select:focus,button:focus-visible,summary:focus-visible{outline:3px solid #a7f3d0;outline-offset:1px;border-color:#059669}.network-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}.scan{min-height:48px;padding:0 14px;border:1px solid #94a3b8;border-radius:6px;background:#f8fafc;color:#334155;font-weight:700}.password{position:relative}.password input{padding-right:72px}.showpass{position:absolute;right:5px;top:5px;min-height:38px;border:0;border-radius:5px;background:#e2e8f0;color:#334155;padding:0 10px;font-size:12px;font-weight:700}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}details{margin-top:12px;border-top:1px solid #e2e8f0;padding-top:12px}summary{cursor:pointer;font-size:13px;font-weight:750}.primary{width:100%;min-height:50px;border:0;border-radius:7px;padding:13px;background:#059669;color:white;font-size:16px;font-weight:750}.primary:disabled,.scan:disabled{opacity:.65}.secondary{display:inline-block;margin-top:12px;color:#475569;font-size:12px}.error{border-left-color:#e11d48;background:#fff1f2;color:#9f1239}.footer{font-size:11px;color:#64748b;text-align:center;margin-top:18px}@media(max-width:680px){header{padding:20px 16px}h1{font-size:21px}main{padding:14px 12px 32px}.steps{gap:5px}.step{padding:8px 6px;font-size:11px}.step span{display:none}form{grid-template-columns:1fr}.network{grid-row:auto}.section{padding:15px}.grid{grid-template-columns:1fr}.network-row{grid-template-columns:minmax(0,1fr) auto}.scan{padding:0 10px}}";
+  html += "</style></head><body><header><div><div class='eyebrow'>FPV Car Setup</div><h1>เชื่อมต่อรถกับ Wi-Fi</h1><p class='sub'>ตั้งค่าครั้งเดียว รถและกล้องจะใช้เครือข่ายเดียวกันผ่าน UART</p></div></header><main>";
+  html += "<div class='status'><strong>พร้อมตั้งค่า</strong><p class='hint'>ตอนนี้เชื่อมต่อกับ FPV-Car-Setup · เปิด ESP32 และ ESP32-CAM ไว้ตลอดขั้นตอน</p></div>";
+  html += "<div class='steps' aria-label='ขั้นตอนการตั้งค่า'><div class='step'><span>1</span>เลือก Wi-Fi</div><div class='step'><span>2</span>ส่งให้กล้อง</div><div class='step'><span>3</span>ตรวจ Cloud</div></div>";
   if (setupLastError.length() > 0) html += "<div class='status error'><strong>การเชื่อมต่อครั้งก่อนยังไม่สำเร็จ</strong><p class='hint'>" + htmlEscape(setupLastError.c_str()) + "</p></div>";
-  html += "<form method='post' action='/save'><section class='section'><div class='title'><span class='num'>1</span><div><h2>เลือก Wi-Fi หรือ Hotspot</h2><p class='hint'>ใช้เครือข่าย 2.4 GHz ที่รถอยู่ในระยะสัญญาณ</p></div></div>";
-  html += "<label for='ssid_select'>เครือข่ายที่สแกนพบ</label><select id='ssid_select' name='ssid_select' onchange='toggleManual()'><option value=''>ใส่ชื่อเครือข่ายเอง</option>";
+  html += "<form method='post' action='/save' id='setupForm'><section class='section network'><div class='title'><span class='num'>1</span><div><h2>เลือก Wi-Fi หรือ Hotspot</h2><p class='hint'>รองรับ 2.4 GHz และ Hotspot ต้องอนุญาตอย่างน้อย 2 อุปกรณ์</p></div></div>";
+  html += "<label for='ssid_select'>เครือข่ายที่สแกนพบ</label><div class='network-row'><select id='ssid_select' name='ssid_select' onchange='toggleManual()'><option value=''>เครือข่ายอื่นหรือ Wi-Fi ซ่อนชื่อ</option>";
   html += wifiOptionsHtml();
-  html += "</select><div id='manual'><label for='ssid'>ชื่อเครือข่าย</label><input id='ssid' name='ssid' autocomplete='off' value='";
+  html += "</select><button class='scan' type='button' onclick='rescan(this)'>สแกนใหม่</button></div><div id='manual'><label for='ssid'>ชื่อเครือข่าย</label><input id='ssid' name='ssid' autocomplete='off' value='";
   html += htmlEscape(config.wifiSsid);
-  html += "'></div><label for='password'>รหัสผ่าน Wi-Fi</label><input id='password' name='password' type='password' autocomplete='new-password' placeholder='";
+  html += "'></div><label for='password'>รหัสผ่าน Wi-Fi</label><div class='password'><input id='password' name='password' type='password' autocomplete='new-password' placeholder='";
   html += strlen(config.wifiSsid) > 0 ? "เว้นว่างเพื่อใช้รหัสเดิม" : "ใส่รหัสผ่านของเครือข่าย";
-  html += "'><p class='hint' style='margin-top:6px'>หากเลือก Wi-Fi เดิม สามารถเว้นว่างเพื่อใช้รหัสที่บันทึกไว้</p></section>";
-  html += "<section class='section'><div class='title'><span class='num'>2</span><div><h2>ตรวจสอบ Cloud</h2><p class='hint'>ค่าเดิมพร้อมใช้งานแล้ว เปิดส่วนนี้เมื่อต้องเปลี่ยนเซิร์ฟเวอร์เท่านั้น</p></div></div><details><summary>การตั้งค่าขั้นสูง</summary><div class='grid'>";
+  html += "'><button class='showpass' type='button' onclick='togglePassword(this)' aria-controls='password'>แสดง</button></div><p class='hint' style='margin-top:6px'>ถ้าเลือกเครือข่ายเดิม สามารถเว้นว่างเพื่อใช้รหัสที่บันทึกไว้</p></section>";
+  html += "<section class='section'><div class='title'><span class='num'>2</span><div><h2>Cloud และตัวรถ</h2><p class='hint'>ไม่ต้องแก้ส่วนนี้ หากเว็บควบคุมใช้งานได้อยู่แล้ว</p></div></div><details><summary>เปิดการตั้งค่าขั้นสูง</summary><div class='grid'>";
   html += "<div><label>รูปแบบ WebSocket</label><select name='ws_scheme'><option value='ws'>ws</option><option value='wss'";
   html += strcmp(config.wsScheme, "wss") == 0 ? " selected" : "";
   html += ">wss</option></select></div>";
@@ -1410,27 +1457,58 @@ void sendSetupPage() {
   html += "<div><label>Vehicle ID</label><input name='vehicle_id' value='" + htmlEscape(config.vehicleId) + "'></div>";
   html += "<div><label>Auth token</label><input name='auth_token' type='password' placeholder='เว้นว่างเพื่อใช้ค่าเดิม'></div>";
   html += "</div><label>หน้าเว็บควบคุม</label><input name='control_url' value='" + htmlEscape(config.controlUrl) + "'></details></section>";
-  html += "<section class='section'><div class='title'><span class='num'>3</span><div><h2>บันทึกให้ทั้งสองบอร์ด</h2><p class='hint'>ห้ามปิดไฟจนกว่าหน้าถัดไปจะแจ้งว่า ESP32-CAM รับค่าแล้ว</p></div></div><button class='primary' type='submit'>บันทึกและเชื่อมต่อ</button></section></form>";
+  html += "<section class='section'><div class='title'><span class='num'>3</span><div><h2>บันทึกและทดสอบ</h2><p class='hint'>ระบบจะส่งค่าให้กล้อง แล้วทดสอบการเชื่อมต่อก่อนปิดโหมดตั้งค่า</p></div></div><button class='primary' id='saveButton' type='submit'>บันทึกและเชื่อมต่อทั้งสองบอร์ด</button></section></form>";
   html += "<a class='secondary' href='/reset-wifi' onclick=\"return confirm('ล้างค่า Wi-Fi ที่บันทึกไว้หรือไม่?')\">ล้างค่า Wi-Fi และเริ่มใหม่</a><p class='footer'>หากหน้านี้ไม่เปิดอัตโนมัติ ให้เข้า 192.168.4.1</p>";
-  html += "</main><script>function toggleManual(){document.getElementById('manual').hidden=document.getElementById('ssid_select').value!==''}toggleManual()</script></body></html>";
+  html += "</main><script>const form=document.getElementById('setupForm'),select=document.getElementById('ssid_select'),manual=document.getElementById('manual'),ssid=document.getElementById('ssid'),save=document.getElementById('saveButton');function toggleManual(){const show=select.value==='';manual.hidden=!show;ssid.required=show}function togglePassword(button){const input=document.getElementById('password'),show=input.type==='password';input.type=show?'text':'password';button.textContent=show?'ซ่อน':'แสดง'}function rescan(button){button.disabled=true;button.textContent='กำลังสแกน';location.reload()}form.addEventListener('submit',function(event){toggleManual();if(select.value===''&&!ssid.value.trim()){event.preventDefault();ssid.focus();return}save.disabled=true;save.textContent='กำลังบันทึก...'});addEventListener('pageshow',function(){save.disabled=false;save.textContent='บันทึกและเชื่อมต่อทั้งสองบอร์ด'});toggleManual()</script></body></html>";
   portalServer.send(200, "text/html", html);
+}
+
+bool cameraReadyForSetup() {
+  const unsigned long now = millis();
+  return
+    lastCameraUartStatusAt > 0 &&
+    now - lastCameraUartStatusAt < 5000 &&
+    cameraUartWifiConnected &&
+    cameraUartCloudConnected &&
+    cameraUartReady &&
+    cameraUartStreamActive &&
+    cameraUartSsid == String(config.wifiSsid);
 }
 
 void sendSetupStatus() {
   JsonDocument doc;
   doc["cameraAcked"] = camProvisionAcked;
+  doc["cameraReady"] = cameraUartReady;
+  doc["cameraCloudConnected"] = cameraUartCloudConnected;
   doc["vehicleConnected"] = WiFi.status() == WL_CONNECTED;
   doc["ssid"] = config.wifiSsid;
 
-  if (setupConnectDone && setupConnectOk) {
+  if (setupConnectDone && setupConnectOk && cameraReadyForSetup()) {
     doc["phase"] = "connected";
-    doc["message"] = "เชื่อมต่อสำเร็จ กำลังปิดโหมดตั้งค่า";
+    doc["message"] = "รถ กล้อง และ Cloud เชื่อมต่อสำเร็จ กำลังเปิดหน้าควบคุม";
+  } else if (setupConnectDone && setupConnectOk) {
+    doc["phase"] = "connecting";
+    if (lastCameraUartStatusAt == 0 || millis() - lastCameraUartStatusAt >= 5000) {
+      doc["message"] = "รถเชื่อมต่อแล้ว กำลังรอสถานะจาก ESP32-CAM";
+    } else if (!cameraUartWifiConnected) {
+      doc["message"] = "รถเชื่อมต่อแล้ว กำลังรอกล้องเชื่อม Wi-Fi";
+    } else if (cameraUartSsid != String(config.wifiSsid)) {
+      doc["message"] = "กล้องยังอยู่คนละ Wi-Fi กำลังรอให้ซิงก์กับรถ";
+    } else if (!cameraUartReady) {
+      doc["message"] = "กล้องเชื่อม Wi-Fi แล้ว กำลังเริ่มเซนเซอร์กล้อง";
+    } else if (!cameraUartCloudConnected) {
+      doc["message"] = "เซนเซอร์กล้องพร้อมแล้ว กำลังเชื่อมต่อ Cloud";
+    } else if (!cameraUartStreamActive) {
+      doc["message"] = "กล้องและ Cloud พร้อมแล้ว กำลังทดสอบส่งภาพจริง";
+    } else {
+      doc["message"] = "กำลังตรวจสอบสถานะกล้องรอบสุดท้าย";
+    }
   } else if (setupLastError.length() > 0) {
     doc["phase"] = "error";
     doc["message"] = setupLastError;
   } else if (camProvisionAcked) {
     doc["phase"] = "connecting";
-    doc["message"] = "ESP32-CAM รับค่าผ่านสาย UART แล้ว กำลังเชื่อมต่อ Wi-Fi";
+    doc["message"] = "ESP32-CAM รับค่าผ่าน UART แล้ว กำลังเตรียมเชื่อมต่อ Wi-Fi";
   } else if (setupProvisionReady) {
     doc["phase"] = "waiting_camera";
     doc["message"] = "บันทึกแล้ว กำลังรอ ESP32-CAM ยืนยันผ่านสาย UART";
@@ -1490,11 +1568,15 @@ void handleSetupSave() {
   sendCameraProvisionUart();
   Serial.println("Setup saved. Provision payload sent to ESP32-CAM over UART.");
 
-  portalServer.send(200, "text/html; charset=utf-8",
-                    "<!doctype html><html lang='th'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-                    "<title>กำลังเชื่อมต่อ</title><style>body{font-family:system-ui;margin:0;background:#eef2f3;color:#172033}main{max-width:560px;margin:0 auto;padding:34px 18px}.box{background:white;border:1px solid #d8e0e5;border-radius:8px;padding:22px}.loader{width:28px;height:28px;border:4px solid #d1fae5;border-top-color:#059669;border-radius:50%;animation:r 1s linear infinite}@keyframes r{to{transform:rotate(360deg)}}h1{font-size:21px}p{line-height:1.6;color:#475569}.state{margin-top:18px;padding:12px;background:#f1f5f9;border-radius:6px;font-weight:650}.back{display:inline-block;margin-top:16px;color:#047857}</style>"
-                    "<main><div class='box'><div class='loader' id='loader'></div><h1>กำลังตั้งค่าสองบอร์ด</h1><p>เปิดไฟ ESP32 และ ESP32-CAM ไว้ ระบบกำลังส่งค่าผ่านสาย UART และตรวจสอบ Wi-Fi</p><div class='state' id='state'>กำลังรอ ESP32-CAM...</div><a class='back' href='/'>กลับไปแก้ไขค่า</a></div></main>"
-                    "<script>async function check(){try{const r=await fetch('/api/setup-status',{cache:'no-store'});const s=await r.json();document.getElementById('state').textContent=s.message;if(s.phase==='connected'){document.getElementById('loader').style.display='none';return}}catch(e){document.getElementById('state').textContent='การเชื่อมต่อกับ FPV-Car-Setup สิ้นสุดแล้ว ลองเปิดหน้าเว็บควบคุม'}setTimeout(check,1000)}check()</script></html>");
+  String responseHtml;
+  responseHtml.reserve(6000);
+  responseHtml += "<!doctype html><html lang='th'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>กำลังเชื่อมต่อ FPV Car</title><style>";
+  responseHtml += "[hidden]{display:none!important}";
+  responseHtml += "*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}body{font-family:system-ui;margin:0;min-height:100vh;background:#eef2f3;color:#172033}header{background:#111827;color:white;padding:22px 18px}header div,main{max-width:620px;margin:auto}h1{font-size:22px;margin:0 0 6px}p{margin:0;line-height:1.55;color:#64748b}.sub{color:#cbd5e1;font-size:13px}main{padding:18px 14px}.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:14px}.step{padding:10px 7px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc;text-align:center;font-size:12px;font-weight:700;color:#64748b}.step.active{border-color:#10b981;background:#ecfdf5;color:#047857}.box{background:white;border:1px solid #d8e0e5;border-radius:8px;padding:20px}.loader{width:28px;height:28px;margin-bottom:14px;border:4px solid #d1fae5;border-top-color:#059669;border-radius:50%;animation:r 1s linear infinite}@keyframes r{to{transform:rotate(360deg)}}h2{font-size:18px;margin:0 0 7px}.state{margin-top:17px;padding:12px;background:#f1f5f9;border-radius:6px;font-weight:700;line-height:1.5}.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}.button{display:inline-grid;place-items:center;min-height:46px;padding:0 15px;border-radius:6px;text-decoration:none;font-weight:700}.primary{background:#059669;color:white}.secondary{border:1px solid #94a3b8;color:#334155}@media(max-width:480px){header{padding:18px 15px}main{padding:14px 12px}.step{font-size:11px;padding:9px 4px}.box{padding:17px}.actions{display:grid}.button{width:100%}}</style></head><body>";
+  responseHtml += "<header><div><h1>กำลังเชื่อมต่อรถ</h1><p class='sub'>อย่าปิดไฟหรือออกจาก FPV-Car-Setup จนกว่าระบบจะแจ้งว่าสำเร็จ</p></div></header><main><div class='steps'><div class='step active' id='step1'>ส่งให้กล้อง</div><div class='step' id='step2'>เชื่อม Wi-Fi</div><div class='step' id='step3'>พร้อมใช้งาน</div></div><section class='box'><div class='loader' id='loader'></div><h2 id='heading'>กำลังตั้งค่าสองบอร์ด</h2><p>ESP32 จะส่งค่าให้ ESP32-CAM ผ่าน UART แล้วตรวจว่าเชื่อมต่อเครือข่ายได้จริง</p><div class='state' id='state' aria-live='polite'>กำลังรอ ESP32-CAM...</div><div class='actions'><a class='button primary' id='controller' href='";
+  responseHtml += htmlEscape(config.controlUrl);
+  responseHtml += "' hidden>เปิดหน้าควบคุม</a><a class='button secondary' href='/'>กลับไปแก้ไข</a></div></section></main><script>const state=document.getElementById('state'),loader=document.getElementById('loader'),heading=document.getElementById('heading'),controller=document.getElementById('controller'),steps=[document.getElementById('step1'),document.getElementById('step2'),document.getElementById('step3')];function progress(index){steps.forEach((step,i)=>step.classList.toggle('active',i<=index))}async function check(){try{const response=await fetch('/api/setup-status',{cache:'no-store'}),status=await response.json();state.textContent=status.message;if(status.phase==='waiting_camera'){progress(0)}else if(status.phase==='connecting'){progress(1)}else if(status.phase==='connected'){progress(2);loader.hidden=true;heading.textContent='เชื่อมต่อสำเร็จ';controller.hidden=false;setTimeout(()=>location.href=controller.href,5000);return}else if(status.phase==='error'){loader.hidden=true;heading.textContent='เชื่อมต่อยังไม่สำเร็จ';return}}catch(error){state.textContent='FPV-Car-Setup ปิดแล้ว กำลังรอให้อุปกรณ์กลับเข้าเครือข่าย'}setTimeout(check,1000)}check()</script></body></html>";
+  portalServer.send(200, "text/html; charset=utf-8", responseHtml);
 }
 
 
@@ -1566,8 +1648,13 @@ void startSetupPortal() {
       }
     }
 
-    if (setupConnectDone && setupConnectOk && millis() - setupSavedAt > 3000) {
-      Serial.println("Vehicle setup completed after camera ACK.");
+    if (
+      setupConnectDone &&
+      setupConnectOk &&
+      cameraReadyForSetup() &&
+      millis() - setupSavedAt > 3000
+    ) {
+      Serial.println("Vehicle setup completed after camera and Cloud became ready.");
       break;
     }
 
@@ -1709,15 +1796,29 @@ void loop() {
   unsigned long now = millis();
 
   if (
+    wifiFallbackInProgress &&
+    !wifiUartCameraRollbackStarted &&
+    wifiTransactionCommandId.length() > 0 &&
+    now - lastCameraUartSendAt >= WIFI_UART_RETRY_MS
+  ) {
+    sendCameraWifiUart(
+      "rollback",
+      wifiTransactionCommandId,
+      0,
+      wifiRollbackReason.c_str()
+    );
+  } else if (
     wifiTransactionPrepared &&
     !wifiUartCameraPrepared &&
     !wifiTransactionArmed &&
+    !wifiFallbackInProgress &&
     now - lastCameraUartSendAt >= WIFI_UART_RETRY_MS
   ) {
     sendCameraWifiUart("prepare", wifiTransactionCommandId);
   } else if (
     wifiTransactionArmed &&
     !wifiUartCameraArmed &&
+    !wifiFallbackInProgress &&
     !wifiSwitchPending &&
     !wifiSwitchInProgress &&
     now - lastCameraUartSendAt >= WIFI_UART_RETRY_MS
@@ -1726,6 +1827,7 @@ void loop() {
   } else if (
     wifiTransactionArmed &&
     wifiUartCameraArmed &&
+    !wifiFallbackInProgress &&
     !wifiUartCameraSwitchScheduled &&
     (wifiSwitchPending || wifiSwitchInProgress || wifiCandidateConnected) &&
     now - lastCameraUartSendAt >= WIFI_UART_RETRY_MS
@@ -1737,6 +1839,7 @@ void loop() {
     );
   } else if (
     wifiVehicleCommitted &&
+    !wifiFallbackInProgress &&
     !wifiUartCameraCommitted &&
     now - lastCameraUartSendAt >= WIFI_UART_RETRY_MS
   ) {
@@ -1797,26 +1900,76 @@ void loop() {
     wsConnected &&
     !wifiCandidateStatusSent
   ) {
-    sendWifiCandidateStatus("connected", "vehicle reached cloud through candidate WiFi");
+    setWifiCoordinatorState("verifying", "Vehicle connected; verifying camera and image");
     wifiCandidateStatusSent = true;
+  }
+  const bool cameraCandidateReady =
+    lastCameraUartStatusAt > 0 &&
+    now - lastCameraUartStatusAt <= 5000 &&
+    cameraUartWifiConnected &&
+    cameraUartCloudConnected &&
+    cameraUartReady &&
+    cameraUartStreamActive &&
+    cameraUartSsid == wifiCandidateSsid;
+  if (
+    wifiTransactionArmed &&
+    wifiCandidateConnected &&
+    wsConnected &&
+    cameraCandidateReady &&
+    !wifiVehicleCommitted
+  ) {
+    commitWifiCandidate(wifiTransactionCommandId.c_str());
   }
   if (
     wifiFallbackInProgress &&
     WiFi.status() == WL_CONNECTED &&
     wsConnected &&
-    !wifiCandidateStatusSent
+    lastCameraUartStatusAt > 0 &&
+    now - lastCameraUartStatusAt <= 5000 &&
+    cameraUartWifiConnected &&
+    cameraUartSsid == String(config.wifiSsid)
   ) {
-    sendWifiCandidateStatus("rolled_back", "vehicle restored active WiFi");
-    wifiCandidateStatusSent = true;
+    sendWifiUpdateStatus(
+      "failed",
+      false,
+      wifiRollbackReason.length() > 0
+        ? wifiRollbackReason
+        : String("WiFi update failed; previous network restored")
+    );
     clearWifiTransaction();
   }
   if (
     wifiTransactionArmed &&
     !wifiVehicleCommitted &&
     !wifiFallbackInProgress &&
+    wifiCandidateConnected &&
+    now - wifiTransactionStartedAt > 15000
+  ) {
+    const bool cameraStatusFresh =
+      lastCameraUartStatusAt > 0 && now - lastCameraUartStatusAt <= 5000;
+    const bool cameraReportedRollback = cameraUartWifiState == "rollback";
+    const bool cameraStayedIdleOnPreviousWifi =
+      cameraUartWifiState == "idle" &&
+      cameraUartWifiConnected &&
+      cameraUartSsid.length() > 0 &&
+      cameraUartSsid != String(config.wifiSsid);
+    if (
+      cameraStatusFresh &&
+      (cameraReportedRollback || cameraStayedIdleOnPreviousWifi)
+    ) {
+      Serial.print("Camera UART reports different SSID: ");
+      Serial.println(cameraUartSsid);
+      restoreActiveWifi("camera could not join candidate WiFi");
+    }
+  }
+
+  if (
+    wifiTransactionArmed &&
+    !wifiVehicleCommitted &&
+    !wifiFallbackInProgress &&
     now - wifiTransactionStartedAt > WIFI_COMMIT_TIMEOUT_MS
   ) {
-    restoreActiveWifi("cloud commit timed out");
+    restoreActiveWifi("WiFi verification timed out");
   }
   if (
     wifiVehicleCommitted &&

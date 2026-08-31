@@ -128,10 +128,10 @@ After saving:
 - The main ESP32 sends the complete configuration to ESP32-CAM over UART.
 - ESP32-CAM saves the configuration and returns an ACK over UART.
 - Only after that ACK does the main ESP32 join the target Wi-Fi. ESP32-CAM restarts and joins the same saved Wi-Fi.
-- The progress page shows whether the camera has received the settings and whether the vehicle connected successfully.
+- The progress page does not report success after the UART save alone. It waits until the vehicle and camera use the selected SSID, the camera sensor is ready, the camera WebSocket reaches the cloud, and a recent JPEG frame has actually been sent.
 - If the password is incorrect, the setup network remains available so the value can be corrected.
 
-On later boots, both boards use their saved configuration immediately. They do not need to exchange Wi-Fi credentials again unless the network is changed or reset.
+On later boots, ESP32-CAM requests the authoritative configuration from the vehicle over UART before starting Wi-Fi. The vehicle replies from its saved Preferences, and the camera updates its local last-known-good cache only when values differ. If UART is temporarily unavailable, the camera can still use that cache; if the vehicle reports that it has no saved Wi-Fi, the camera clears stale credentials and waits for first-time provisioning.
 
 ## ESP32 Vehicle Setup
 
@@ -160,13 +160,18 @@ When powered on, both variants first hold motor inputs low, then run the Servo t
 2. Select `AI Thinker ESP32-CAM`, then flash it.
 3. Power it on together with the ESP32 vehicle during first-time setup.
 4. The ESP32-CAM does not open its own setup portal. It receives the vehicle configuration over UART, acknowledges the save, and then both boards join the same network.
-5. After saving Wi-Fi, open the camera IP. It redirects to:
+5. At every later camera boot, Serial Monitor should show `Requesting authoritative configuration from vehicle UART` followed by `Vehicle configuration sync received`. The vehicle Serial Monitor should show `ESP32-CAM boot config sync: acknowledged`.
+6. After saving Wi-Fi, open the camera IP. It redirects to:
 
 ```text
 <control_url>?cam=http://<camera-ip>/stream
 ```
 
 The web app stores this camera URL in `localStorage`, so it keeps working after refresh on desktop, phone, and tablet. When cloud WebSocket settings are configured, the ESP32-CAM publishes JPEG frames directly as binary WebSocket messages. The relay and browser keep only the newest usable frame so delayed JPEG frames do not build up when the connection slows down.
+
+Camera initialization is retried three times during boot. If initialization still fails, the firmware retries periodically while Wi-Fi remains available. Five consecutive frame-buffer failures trigger an automatic camera deinit/init cycle. A Wi-Fi change also resets and starts the camera WebSocket again, so recovering video should not require a manual power cycle.
+
+If the saved camera Wi-Fi is unavailable at boot, ESP32-CAM no longer blocks before entering its main loop. It continues in offline recovery mode, retries the saved network, reports status over UART, and can still receive provisioning, reset, rollback, or a later web Wi-Fi transaction from the vehicle.
 
 The Vehicle tab in Settings provides three persistent cloud stream profiles:
 
@@ -183,17 +188,18 @@ Deploy the updated relay and web app before flashing this ESP32-CAM firmware. Th
 The controller page can change Wi-Fi for both boards from one form:
 
 - The web app sends `WIFI_SCAN` through the cloud relay. The ESP32 scans nearby 2.4 GHz networks and returns SSID, signal strength, channel, and security status for the selection list.
-- The web app sends one `WIFI_SET` request. The relay sends the candidate credentials only to the main ESP32.
-- The main ESP32 keeps its current cloud connection and forwards the candidate to ESP32-CAM over UART. ESP32-CAM pauses cloud frames during the transaction.
-- ESP32-CAM acknowledges `prepared`, `armed`, and `switching` over UART. The main ESP32 retries each phase until it receives the matching acknowledgement; duplicate switch requests do not restart the camera countdown.
+- The web app sends one `WIFI_SET` request. The relay forwards that same command only to the main ESP32 and waits for the final result.
+- The main ESP32 is the only Wi-Fi transaction coordinator. It keeps the current credentials as a fallback, forwards the candidate to ESP32-CAM over UART, and decides when both boards switch, verify, commit, or roll back.
+- ESP32-CAM accepts Wi-Fi changes only from the vehicle UART. It acknowledges `prepared`, `armed`, `switching`, and `committed`; the vehicle retries missing UART phases safely.
 - During the switch, both boards disable reconnect to the previous access point and accept success only when the connected SSID matches the selected network. ESP32-CAM also gives a brief disconnect grace period before restarting association, so a slow hotspot or DHCP response is not interrupted repeatedly.
-- The cloud relay repeats the active `WIFI_PREPARE`, `WIFI_APPLY`, `WIFI_SWITCH`, or `WIFI_COMMIT` phase every two seconds until the expected acknowledgement arrives. A short WebSocket interruption therefore no longer loses the one command needed to finish the transaction.
+- Until the vehicle reports that it accepted the request, the relay retries only the same idempotent `WIFI_SET` command. After acceptance, progress and recovery continue locally even while cloud WebSocket connections restart.
 - Both boards retain their previous active credentials while testing the candidate network.
-- The relay sends `WIFI_COMMIT` to the main ESP32 only after both boards report that they are online through the selected SSID and gateway. The main ESP32 commits locally and forwards the commit to ESP32-CAM over UART.
-- The controller reports success only after both boards acknowledge the commit.
-- If a board fails to prepare, connect, or return to the relay before the timeout, `WIFI_ROLLBACK` restores the previous network. A local commit timeout provides the same recovery if the relay becomes unavailable.
+- The vehicle commits only after it is back on the cloud and a fresh camera UART status confirms the selected SSID, camera cloud connection, initialized sensor, and active JPEG stream.
+- The controller reports success only after the vehicle and camera both acknowledge the local commit.
+- If either board fails to prepare, join the candidate, reconnect to cloud, or produce a camera frame before timeout, the vehicle restores the previous network on both boards over UART. The relay never issues an independent rollback.
+- ESP32-CAM reports its Wi-Fi transaction state over UART and retries candidate association before falling back. The vehicle ignores a temporary old SSID while the camera is still switching, but coordinates an immediate rollback when the camera reports that fallback has started.
 - During a successful web Wi-Fi change, the vehicle Serial Monitor shows camera ACKs for `prepared`, `armed`, `switching`, and `committed`. If one is missing, check the crossed TX/RX wires and common GND from the UART wiring table above.
-- Keep the relay, selected vehicle sketch, and ESP32-CAM sketch on the same release when changing Wi-Fi from the web app. The retry protocol depends on idempotent handling in all three components.
+- Keep the relay, selected vehicle sketch, and ESP32-CAM sketch on the same release when changing Wi-Fi from the web app.
 - The controller does not need direct access to the camera IP, so the change also works when the browser and car use different networks.
 - Settings compares the SSID and gateway reported by both boards and shows whether they are on the same Wi-Fi.
 

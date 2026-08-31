@@ -135,6 +135,17 @@ export interface WifiScanResultMessage {
   requestId?: string;
 }
 
+export interface WifiUpdateStatusMessage {
+  type: "wifi_update_status";
+  vehicleId: string;
+  commandId: string;
+  state: "preparing" | "switching" | "verifying" | "committing" | "success" | "failed";
+  ok: boolean;
+  ssid: string;
+  message?: string;
+  timestamp: number;
+}
+
 export interface StatusMessage {
   type: "status";
   vehicleId: string;
@@ -174,6 +185,7 @@ export type IncomingMessage =
   | CameraStreamStatusMessage
   | DeviceLogMessage
   | WifiScanResultMessage
+  | WifiUpdateStatusMessage
   | StatusMessage
   | PongMessage
   | AckMessage

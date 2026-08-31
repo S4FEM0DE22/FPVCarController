@@ -79,6 +79,7 @@ export default function ControllerPage() {
     wifiNetworks,
     wifiScanState,
     wifiScanError,
+    wifiUpdateStatus,
     requestWifiScan,
   } = useVehicleController();
 
@@ -445,6 +446,7 @@ export default function ControllerPage() {
         wifiNetworks={wifiNetworks}
         wifiScanState={wifiScanState}
         wifiScanError={wifiScanError}
+        wifiUpdateStatus={wifiUpdateStatus}
         onScanWifi={requestWifiScan}
         onReconnectVehicle={async () => {
           await handleSystemActionWithAck("NETWORK_RECONNECT");

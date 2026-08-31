@@ -52,10 +52,7 @@ const CAMERA_RENDER_ACK_TIMEOUT_MS = Number(
   process.env.CAMERA_RENDER_ACK_TIMEOUT_MS || 900
 );
 const WIFI_UPDATE_ACK_TIMEOUT_MS = Number(
-  process.env.WIFI_UPDATE_ACK_TIMEOUT_MS || 70000
-);
-const WIFI_PREPARE_ACK_TIMEOUT_MS = Number(
-  process.env.WIFI_PREPARE_ACK_TIMEOUT_MS || 20000
+  process.env.WIFI_UPDATE_ACK_TIMEOUT_MS || 120000
 );
 const WIFI_ACTION_RETRY_INTERVAL_MS = Number(
   process.env.WIFI_ACTION_RETRY_INTERVAL_MS || 2000
@@ -385,55 +382,35 @@ function failPendingWifiChange(entry, message) {
   if (!pending) return;
   clearTimeout(pending.timeoutId);
   clearInterval(pending.retryId);
-  const rollback = {
-    type: "action",
-    action: "WIFI_ROLLBACK",
-    commandId: pending.commandId,
-    payload: { reason: message },
-  };
-  safeSend(entry.esp, rollback);
   entry.pendingWifiChange = null;
-  safeSend(pending.controller, {
+  broadcastToControllers(pending.vehicleId, {
     type: "error",
     commandId: pending.commandId,
     message,
   });
 }
 
-function wifiParticipantName(clientType) {
-  if (clientType === "esp") return "vehicle";
-  if (clientType === "esp-cam") return "camera";
-  return null;
-}
-
-function sendWifiActionToVehicle(entry, pending, action, includeCredentials = false) {
+function sendWifiUpdateToVehicle(entry, pending) {
   const message = {
     type: "action",
-    action,
+    action: "WIFI_SET",
     commandId: pending.commandId,
-    payload: includeCredentials
-      ? { ssid: pending.ssid, password: pending.password }
-      : {},
+    payload: { ssid: pending.ssid, password: pending.password },
   };
   return safeSend(entry.esp, message);
 }
 
-function retryWifiActionUntilPhaseChanges(
-  entry,
-  pending,
-  action,
-  includeCredentials = false
-) {
+function retryWifiUpdateUntilAccepted(entry, pending) {
   clearInterval(pending.retryId);
   pending.retryId = setInterval(() => {
     if (entry.pendingWifiChange?.commandId !== pending.commandId) {
       clearInterval(pending.retryId);
       return;
     }
-    sendWifiActionToVehicle(entry, pending, action, includeCredentials);
+    if (!pending.accepted) sendWifiUpdateToVehicle(entry, pending);
   }, WIFI_ACTION_RETRY_INTERVAL_MS);
   pending.retryId.unref?.();
-  return sendWifiActionToVehicle(entry, pending, action, includeCredentials);
+  return sendWifiUpdateToVehicle(entry, pending);
 }
 
 function scheduleWifiTransactionTimeout(entry, pending, timeoutMs, message) {
@@ -445,51 +422,11 @@ function scheduleWifiTransactionTimeout(entry, pending, timeoutMs, message) {
   pending.timeoutId.unref?.();
 }
 
-function maybeStartWifiApply(entry, pending) {
-  if (pending.stage !== "preparing" || pending.prepared.size !== 2) return true;
-
-  pending.stage = "arming";
-  scheduleWifiTransactionTimeout(
-    entry,
-    pending,
-    WIFI_UPDATE_ACK_TIMEOUT_MS,
-    "WiFi switch timed out; both devices are restoring the previous network"
-  );
-  retryWifiActionUntilPhaseChanges(entry, pending, "WIFI_APPLY");
-  logger.info({
-    event: "wifi_update.apply_sent",
-    vehicleId: entry.esp?.meta?.vehicleId || null,
-    commandId: pending.commandId,
-    ssid: pending.ssid,
-  });
-  return true;
-}
-
-function maybeStartWifiSwitch(entry, pending) {
-  if (pending.stage !== "arming" || pending.armed.size !== 2) return true;
-
-  pending.stage = "switching";
-  scheduleWifiTransactionTimeout(
-    entry,
-    pending,
-    WIFI_UPDATE_ACK_TIMEOUT_MS,
-    "WiFi switch timed out; both devices are restoring the previous network"
-  );
-  retryWifiActionUntilPhaseChanges(entry, pending, "WIFI_SWITCH");
-  logger.info({
-    event: "wifi_update.switch_sent",
-    vehicleId: entry.esp?.meta?.vehicleId || null,
-    commandId: pending.commandId,
-    ssid: pending.ssid,
-  });
-  return true;
-}
-
 function completePendingWifiChange(entry, pending) {
   clearTimeout(pending.timeoutId);
   clearInterval(pending.retryId);
   entry.pendingWifiChange = null;
-  safeSend(pending.controller, {
+  broadcastToControllers(pending.vehicleId, {
     type: "ack",
     commandId: pending.commandId,
     message: `Vehicle and camera are online through ${pending.ssid}`,
@@ -647,7 +584,6 @@ logger.info({
   cameraControllerMaxBufferedBytes: CAMERA_CONTROLLER_MAX_BUFFERED_BYTES,
   cameraRenderAckTimeoutMs: CAMERA_RENDER_ACK_TIMEOUT_MS,
   wifiUpdateAckTimeoutMs: WIFI_UPDATE_ACK_TIMEOUT_MS,
-  wifiPrepareAckTimeoutMs: WIFI_PREPARE_ACK_TIMEOUT_MS,
   wifiActionRetryIntervalMs: WIFI_ACTION_RETRY_INTERVAL_MS,
   cameraLivenessTimeoutMs: CAMERA_LIVENESS_TIMEOUT_MS,
   vehicleLivenessTimeoutMs: VEHICLE_LIVENESS_TIMEOUT_MS,
@@ -1044,110 +980,41 @@ wss.on("connection", (ws, request) => {
       return;
     }
 
-    if (
-      data.type === "wifi_phase_ack" ||
-      data.type === "wifi_uart_camera_phase"
-    ) {
+    if (data.type === "wifi_update_status") {
       const pending = entry.pendingWifiChange;
       const commandId =
         typeof data.commandId === "string" ? data.commandId.trim() : "";
-      if (!pending || !commandId || pending.commandId !== commandId) return;
-
-      const uartCameraPhase = data.type === "wifi_uart_camera_phase";
-      const participant = uartCameraPhase
-        ? clientType === "esp"
-          ? "camera"
-          : null
-        : wifiParticipantName(clientType);
-      const phase = typeof data.phase === "string" ? data.phase : "";
-      if (!participant || data.ok !== true || data.ssid !== pending.ssid) {
-        failPendingWifiChange(
-          entry,
-          data.message || "A device rejected the WiFi update"
-        );
-        return;
-      }
-
-      if (phase === "prepared") {
-        pending.prepared.add(participant);
-        if (!maybeStartWifiApply(entry, pending)) return;
-      } else if (phase === "armed") {
-        pending.armed.add(participant);
-        if (!maybeStartWifiSwitch(entry, pending)) return;
-      } else if (phase === "committed") {
-        if (pending.stage !== "committing") return;
-        pending.committed.add(participant);
-        if (pending.committed.size === 2) {
-          completePendingWifiChange(entry, pending);
-        }
-      } else if (phase === "rolled_back") {
-        failPendingWifiChange(entry, data.message || "WiFi update was rolled back");
-      }
-
-      logger.info({
-        event: "wifi_update.phase_ack",
-        ip,
-        connectionId,
-        vehicleId,
-        commandId,
-        participant,
-        phase,
-      });
-      return;
-    }
-
-    if (data.type === "wifi_candidate_status") {
-      const pending = entry.pendingWifiChange;
-      const commandId =
-        typeof data.commandId === "string" ? data.commandId.trim() : "";
-      if (!pending || !commandId || pending.commandId !== commandId) return;
-
-      const participant = wifiParticipantName(clientType);
-      const state = typeof data.state === "string" ? data.state : "";
-      const gateway = typeof data.gateway === "string" ? data.gateway.trim() : "";
-      if (!participant) return;
       if (
-        pending.stage !== "switching" ||
-        state !== "connected" ||
-        data.ssid !== pending.ssid ||
-        !gateway
-      ) {
+        clientType !== "esp" ||
+        !pending ||
+        !commandId ||
+        pending.commandId !== commandId ||
+        data.ssid !== pending.ssid
+      ) return;
+
+      pending.accepted = true;
+      clearInterval(pending.retryId);
+      broadcastToControllers(pending.vehicleId, data);
+
+      const state = typeof data.state === "string" ? data.state : "";
+      if (state === "success" && data.ok === true) {
+        completePendingWifiChange(entry, pending);
+      } else if (state === "failed" || data.ok === false) {
         failPendingWifiChange(
           entry,
-          data.message || `${participant} could not use the candidate WiFi`
+          data.message || "Vehicle restored the previous WiFi"
         );
-        return;
       }
 
-      pending.connected.add(participant);
-      pending.gateways.set(participant, gateway);
       logger.info({
-        event: "wifi_update.candidate_connected",
+        event: "wifi_update.status",
         ip,
         connectionId,
         vehicleId,
         commandId,
-        participant,
-        ssid: pending.ssid,
+        state,
+        ok: data.ok === true,
       });
-
-      if (pending.connected.size === 2) {
-        if (new Set(pending.gateways.values()).size !== 1) {
-          failPendingWifiChange(
-            entry,
-            "Vehicle and camera reached different WiFi gateways; restoring the previous network"
-          );
-          return;
-        }
-        pending.stage = "committing";
-        scheduleWifiTransactionTimeout(
-          entry,
-          pending,
-          WIFI_PREPARE_ACK_TIMEOUT_MS,
-          "A device did not confirm the WiFi commit in time"
-        );
-        retryWifiActionUntilPhaseChanges(entry, pending, "WIFI_COMMIT");
-      }
       return;
     }
 
@@ -1348,18 +1215,20 @@ wss.on("connection", (ws, request) => {
           });
           return;
         }
-        failPendingWifiChange(entry, "WiFi update replaced by a newer request");
+        if (entry.pendingWifiChange) {
+          safeSend(ws, {
+            type: "error",
+            commandId,
+            message: "A WiFi update is already in progress",
+          });
+          return;
+        }
         const pending = {
           commandId,
-          controller: ws,
+          vehicleId,
           ssid,
           password,
-          stage: "preparing",
-          prepared: new Set(),
-          armed: new Set(),
-          connected: new Set(),
-          committed: new Set(),
-          gateways: new Map(),
+          accepted: false,
           timeoutId: null,
           retryId: null,
         };
@@ -1367,19 +1236,14 @@ wss.on("connection", (ws, request) => {
         scheduleWifiTransactionTimeout(
           entry,
           pending,
-          WIFI_PREPARE_ACK_TIMEOUT_MS,
-          "A device did not prepare the WiFi update in time"
+          WIFI_UPDATE_ACK_TIMEOUT_MS,
+          "Vehicle did not finish the WiFi update in time"
         );
 
-        retryWifiActionUntilPhaseChanges(
-          entry,
-          pending,
-          "WIFI_PREPARE",
-          true
-        );
+        retryWifiUpdateUntilAccepted(entry, pending);
 
         logger.info({
-          event: "wifi_update.prepare_sent",
+          event: "wifi_update.sent",
           ip,
           connectionId,
           vehicleId,

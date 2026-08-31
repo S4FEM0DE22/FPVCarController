@@ -22,7 +22,11 @@ import {
 } from "@/lib/softCodeProfile";
 import { NETWORK_CONFIG } from "@/constants/network";
 import type { VehicleSoftCodeProfile } from "@/types/control";
-import type { CameraStreamProfile, WifiNetwork } from "@/types/socket";
+import type {
+  CameraStreamProfile,
+  WifiNetwork,
+  WifiUpdateStatusMessage,
+} from "@/types/socket";
 import type { WifiScanState } from "@/hooks/useVehicleController";
 import type {
   ControllerAlertRules,
@@ -45,6 +49,7 @@ interface SettingsPanelProps {
   wifiNetworks: WifiNetwork[];
   wifiScanState: WifiScanState;
   wifiScanError: string;
+  wifiUpdateStatus: WifiUpdateStatusMessage | null;
   onScanWifi: () => void;
   onReconnectVehicle: () => Promise<void> | void;
   onRebootVehicle: () => Promise<void> | void;
@@ -85,6 +90,7 @@ export default function SettingsPanel({
   wifiNetworks,
   wifiScanState,
   wifiScanError,
+  wifiUpdateStatus,
   onScanWifi,
   onReconnectVehicle,
   onRebootVehicle,
@@ -583,6 +589,29 @@ export default function SettingsPanel({
                       ? `ใช้ ${selectedNetwork.ssid} กับรถและกล้อง`
                       : "เลือก Wi-Fi ก่อน"}
                   </button>
+
+                  {submitting && wifiUpdateStatus && (
+                    <div className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 text-xs leading-5 text-sky-950">
+                      <RefreshCw size={15} className="mt-0.5 shrink-0 animate-spin text-sky-600" />
+                      <div>
+                        <p className="font-semibold">กำลังตั้งค่าเครือข่ายทั้งสองบอร์ด</p>
+                        <p>{wifiUpdateStatus.message || wifiUpdateStatus.state}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {message && (
+                    <div
+                      role="status"
+                      className={`rounded-md border px-3 py-2.5 text-xs leading-5 ${
+                        message.includes("ไม่สำเร็จ") || message.includes("กรุณา")
+                          ? "border-rose-200 bg-rose-50 text-rose-900"
+                          : "border-emerald-200 bg-emerald-50 text-emerald-900"
+                      }`}
+                    >
+                      {message}
+                    </div>
+                  )}
                 </div>
               </form>
 

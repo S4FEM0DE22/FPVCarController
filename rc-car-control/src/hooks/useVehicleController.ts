@@ -19,6 +19,7 @@ import type {
 import type {
   CameraStreamStatusMessage,
   IncomingMessage,
+  WifiUpdateStatusMessage,
   WifiNetwork,
 } from "@/types/socket";
 
@@ -111,6 +112,8 @@ export default function useVehicleController() {
   const [wifiNetworks, setWifiNetworks] = useState<WifiNetwork[]>([]);
   const [wifiScanState, setWifiScanState] = useState<WifiScanState>("idle");
   const [wifiScanError, setWifiScanError] = useState("");
+  const [wifiUpdateStatus, setWifiUpdateStatus] =
+    useState<WifiUpdateStatusMessage | null>(null);
   const lastSentKeyRef = useRef<string>("");
   const lastMoveSentAtRef = useRef(0);
   const pendingToggleActionsRef = useRef<Set<string>>(new Set());
@@ -326,6 +329,14 @@ export default function useVehicleController() {
       setWifiScanState(message.error ? "error" : "ready");
     }
 
+    if (message.type === "wifi_update_status") {
+      setWifiUpdateStatus(message);
+      if (message.state === "failed" || !message.ok) {
+        setStatusState("error");
+      }
+      setStatusMessage(message.message || `WiFi update: ${message.state}`);
+    }
+
     if (message.type === "status") {
       if (message.state === "offline") {
         setStatusState("offline");
@@ -514,6 +525,7 @@ export default function useVehicleController() {
 
   const handleSystemActionWithAck = useCallback(
     (action: ActionCommand, payload?: Record<string, unknown>) => {
+      if (action === "WIFI_SET") setWifiUpdateStatus(null);
       const message = handleAction(action, CONTROL_SOURCE.system, payload);
       return waitForAck(message.commandId);
     },
@@ -619,6 +631,7 @@ export default function useVehicleController() {
     wifiNetworks,
     wifiScanState,
     wifiScanError,
+    wifiUpdateStatus,
     lastCommand,
     lastAction,
     lastActionAt,
