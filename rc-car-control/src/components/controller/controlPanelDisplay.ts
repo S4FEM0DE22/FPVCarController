@@ -32,7 +32,7 @@ export function actionLabel(action: string) {
     case "CAM_RIGHT":
       return "Arrow Right";
     case "CAM_RESET":
-      return "R / Cam Reset";
+      return "R / Camera Home";
     case "CAMERA_TOGGLE":
       return "X / Cam Toggle";
     case "LIGHT_TOGGLE":
@@ -45,7 +45,7 @@ export function actionLabel(action: string) {
 }
 
 const CAMERA_PAN_CENTER_DEG = 95;
-const CAMERA_TILT_CENTER_DEG = 64;
+const CAMERA_TILT_HOME_DEG = 12;
 
 function formatAxisOffset(
   value: number,
@@ -64,9 +64,9 @@ export function formatCameraAim(pan: number, tilt: number) {
   const panServoDeg = Math.round(pan);
   const tiltServoDeg = Math.round(tilt);
   const panOffsetDeg = Math.round(panServoDeg - CAMERA_PAN_CENTER_DEG);
-  const tiltOffsetDeg = Math.round(tiltServoDeg - CAMERA_TILT_CENTER_DEG);
+  const tiltOffsetDeg = Math.max(0, Math.round(tiltServoDeg - CAMERA_TILT_HOME_DEG));
   const panDeg = Math.abs(panOffsetDeg);
-  const tiltDeg = Math.abs(tiltOffsetDeg);
+  const tiltDeg = tiltOffsetDeg;
   const panLabel = formatAxisOffset(
     panServoDeg,
     CAMERA_PAN_CENTER_DEG,
@@ -74,13 +74,7 @@ export function formatCameraAim(pan: number, tilt: number) {
     "ขวา",
     "ตรง"
   );
-  const tiltLabel = formatAxisOffset(
-    tiltServoDeg,
-    CAMERA_TILT_CENTER_DEG,
-    "เงย",
-    "ก้ม",
-    "ระดับ"
-  );
+  const tiltLabel = tiltDeg === 0 ? "ก้มสุด 0°" : `เงย ${tiltDeg}°`;
 
   return {
     panDeg,

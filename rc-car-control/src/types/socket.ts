@@ -45,6 +45,7 @@ export interface TelemetryMessage {
   vehicleId: string;
   online: boolean;
   battery: number;
+  batteryVoltage?: number;
   wifi: number;
   wifiSsid?: string;
   wifiGateway?: string;

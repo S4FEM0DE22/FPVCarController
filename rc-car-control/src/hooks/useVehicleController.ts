@@ -39,7 +39,7 @@ interface PendingCameraFrame {
 }
 
 const CAMERA_PAN_CENTER = 95;
-const CAMERA_TILT_CENTER = 64;
+const CAMERA_TILT_HOME = 12;
 const MAX_DEVICE_LOGS = 120;
 const WIFI_SCAN_TIMEOUT_MS = 20000;
 const CAMERA_CONFIRM_TIMEOUT_MS = 1800;
@@ -66,7 +66,7 @@ const initialTelemetry: VehicleTelemetry = {
   },
   lightOn: false,
   cameraPan: 95,
-  cameraTilt: 64,
+  cameraTilt: CAMERA_TILT_HOME,
   failure: null,
   vehicleState: "offline",
 };
@@ -102,8 +102,8 @@ export default function useVehicleController() {
   const [cameraOrientation, setCameraOrientation] =
     useState<CameraOrientation>({
       pan: CAMERA_PAN_CENTER,
-      tilt: CAMERA_TILT_CENTER,
-  });
+      tilt: CAMERA_TILT_HOME,
+    });
   const [telemetry, setTelemetry] = useState<VehicleTelemetry>(initialTelemetry);
   const [cameraOnline, setCameraOnline] = useState(false);
   const [cameraStreamStatus, setCameraStreamStatus] =
@@ -266,6 +266,7 @@ export default function useVehicleController() {
           vehicleId: message.vehicleId,
           online: nextOnline,
           battery: message.battery,
+          batteryVoltage: message.batteryVoltage,
           wifi: message.wifi,
           wifiSsid: message.wifiSsid ?? prev.wifiSsid,
           wifiGateway: message.wifiGateway ?? prev.wifiGateway,

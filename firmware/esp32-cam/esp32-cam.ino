@@ -60,9 +60,19 @@ bool wsConnected = false;
 bool webSocketStarted = false;
 bool runtimeServicesStarted = false;
 bool cloudMotionMode = false;
-bool wifiSwitchPending = false;
+enum class CameraWifiPhase : uint8_t {
+  Idle,
+  Ready,
+  CandidateScheduled,
+  ConnectingCandidate,
+  Candidate,
+  RollbackScheduled,
+  ConnectingRollback,
+  Failed
+};
+
+CameraWifiPhase cameraWifiPhase = CameraWifiPhase::Idle;
 unsigned long wifiSwitchAt = 0;
-bool wifiSwitchInProgress = false;
 unsigned long wifiSwitchStartedAt = 0;
 unsigned long lastWifiSwitchRetryAt = 0;
 const unsigned long WIFI_SWITCH_TIMEOUT_MS = 40000;
@@ -80,37 +90,53 @@ unsigned long lastCameraRecoveryAt = 0;
 uint8_t consecutiveFrameCaptureFailures = 0;
 const unsigned long CAMERA_RECOVERY_INTERVAL_MS = 12000;
 const uint8_t CAMERA_FRAME_FAILURE_LIMIT = 5;
+const unsigned long CAMERA_SENSOR_RECONFIGURE_COOLDOWN_MS = 3000;
+const unsigned long CLOUD_ADAPTIVE_COOLDOWN_MS = 1800;
 uint32_t cloudFramesSent = 0;
 uint32_t cloudFrameAcks = 0;
 uint32_t cloudFrameAckTimeouts = 0;
 uint32_t cloudStaleFrameAcks = 0;
+uint32_t cloudFramesDropped = 0;
+uint32_t cloudFramesRejected = 0;
+uint32_t cameraFramesCaptured = 0;
 uint32_t cloudFrameSequence = 0;
 static const uint8_t CLOUD_PENDING_FRAME_SLOTS = 24;
 uint32_t pendingCloudFrameIds[CLOUD_PENDING_FRAME_SLOTS] = {};
 unsigned long pendingCloudFrameSentAt[CLOUD_PENDING_FRAME_SLOTS] = {};
 uint32_t cloudFramesAtLastStatus = 0;
+uint32_t cloudAcksAtLastStatus = 0;
+uint32_t cameraFramesAtLastStatus = 0;
 size_t lastCloudFrameBytes = 0;
 unsigned long lastCloudFrameAckMs = 0;
+unsigned long lastCloudFrameSendMs = 0;
 uint8_t cloudJpegQuality = 17;
 uint8_t stableCloudFrameCount = 0;
+uint8_t pressuredCloudFrameCount = 0;
 unsigned long cloudFrameIntervalMs = 90;
+unsigned long cloudFrameIntervalMinMs = 90;
+unsigned long cloudFrameIntervalMaxMs = 190;
 unsigned long cloudFrameAckTimeoutMs = 1000;
 uint8_t cloudMaxFramesInFlight = 2;
 uint8_t cloudJpegQualityMin = 15;
 uint8_t cloudJpegQualityMax = 26;
 size_t cloudFrameTargetBytes = 32000;
 unsigned long cloudFrameTargetAckMs = 300;
+uint32_t cloudAcksAtLastTune = 0;
+uint32_t cloudTimeoutsAtLastTune = 0;
+uint32_t cloudDropsAtLastTune = 0;
+uint32_t cloudRejectsAtLastTune = 0;
+unsigned long lastCloudAdaptiveAt = 0;
+int appliedCameraFrameSize = -1;
+int appliedCameraJpegQuality = -1;
+unsigned long lastCameraSensorReconfigureAt = 0;
+bool localStreamActive = false;
 String wifiTransactionCommandId = "";
 String wifiCandidateSsid = "";
 String wifiCandidatePass = "";
 String wifiActiveSsid = "";
 String wifiActivePass = "";
-bool wifiTransactionPrepared = false;
-bool wifiTransactionArmed = false;
-bool wifiCandidateConnected = false;
-bool wifiFallbackInProgress = false;
+bool wifiFailureAckSent = false;
 unsigned long wifiTransactionStartedAt = 0;
-const unsigned long WIFI_COORDINATOR_TIMEOUT_MS = 60000;
 String vehicleUartBuffer = "";
 bool uartProvisionReceived = false;
 unsigned long uartProvisionRestartAt = 0;
@@ -120,6 +146,7 @@ String vehicleConfigSyncRequestId = "";
 String lastCommittedWifiCommandId = "";
 String lastCommittedWifiSsid = "";
 unsigned long lastVehicleUartStatusAt = 0;
+unsigned long lastVehicleConfigRequestAt = 0;
 
 String deviceName();
 String streamUrl();
@@ -132,6 +159,19 @@ void setCloudMotionMode(bool active);
 void applyCloudStreamProfile(const char *profile, bool persist);
 void processVehicleUart();
 void sendVehicleUartStatus(bool force = false);
+void setCameraFlash(bool enabled);
+bool applyCameraSettingsIfChanged(
+  framesize_t frameSize,
+  uint8_t jpegQuality,
+  bool forceFrameSize = false
+);
+
+void setCameraFlash(bool enabled) {
+  flashOn = enabled;
+  digitalWrite(FLASH_LED_PIN, flashOn ? HIGH : LOW);
+  Serial.print("Camera flash synchronized: ");
+  Serial.println(flashOn ? "ON" : "OFF");
+}
 
 void printCameraConfig() {
   Serial.println();
@@ -223,20 +263,59 @@ framesize_t cloudIdleFrameSize() {
   if (!cameraHasPsram || strcmp(config.streamProfile, "realtime") == 0) {
     return FRAMESIZE_QVGA;
   }
-  if (strcmp(config.streamProfile, "quality") == 0) {
-    return FRAMESIZE_VGA;
-  }
-  return FRAMESIZE_CIF;
+  return FRAMESIZE_VGA;
 }
 
 framesize_t cloudMotionFrameSize() {
   if (!cameraHasPsram || strcmp(config.streamProfile, "realtime") == 0) {
     return FRAMESIZE_QVGA;
   }
-  if (strcmp(config.streamProfile, "quality") == 0) {
-    return FRAMESIZE_CIF;
+  return FRAMESIZE_VGA;
+}
+
+const char *cameraFrameSizeName(framesize_t frameSize) {
+  if (frameSize == FRAMESIZE_VGA) return "640x480";
+  if (frameSize == FRAMESIZE_CIF) return "400x296";
+  if (frameSize == FRAMESIZE_QVGA) return "320x240";
+  return "other";
+}
+
+uint8_t cloudModeJpegQualityMin() {
+  if (!cloudMotionMode) return cloudJpegQualityMin;
+  if (strcmp(config.streamProfile, "quality") == 0) return 14;
+  if (strcmp(config.streamProfile, "balanced") == 0) return 15;
+  return cloudJpegQualityMin;
+}
+
+bool applyCameraSettingsIfChanged(
+  framesize_t frameSize,
+  uint8_t jpegQuality,
+  bool forceFrameSize
+) {
+  if (!cameraSensor) return false;
+
+  bool applied = false;
+  const unsigned long now = millis();
+  if (appliedCameraFrameSize != (int)frameSize) {
+    const bool cooldownElapsed =
+      lastCameraSensorReconfigureAt == 0 ||
+      now - lastCameraSensorReconfigureAt >= CAMERA_SENSOR_RECONFIGURE_COOLDOWN_MS;
+    if (forceFrameSize || cooldownElapsed) {
+      if (cameraSensor->set_framesize(cameraSensor, frameSize) == 0) {
+        appliedCameraFrameSize = (int)frameSize;
+        lastCameraSensorReconfigureAt = now;
+        applied = true;
+      }
+    }
   }
-  return FRAMESIZE_CIF;
+
+  if (appliedCameraJpegQuality != (int)jpegQuality) {
+    if (cameraSensor->set_quality(cameraSensor, jpegQuality) == 0) {
+      appliedCameraJpegQuality = jpegQuality;
+      applied = true;
+    }
+  }
+  return applied;
 }
 
 void applyCloudStreamProfile(const char *profile, bool persist) {
@@ -244,7 +323,9 @@ void applyCloudStreamProfile(const char *profile, bool persist) {
   strlcpy(config.streamProfile, nextProfile, sizeof(config.streamProfile));
 
   if (strcmp(nextProfile, "realtime") == 0) {
-    cloudFrameIntervalMs = 75;
+    cloudFrameIntervalMs = 70;
+    cloudFrameIntervalMinMs = 70;
+    cloudFrameIntervalMaxMs = 170;
     cloudFrameAckTimeoutMs = 1500;
     cloudJpegQualityMin = 16;
     cloudJpegQualityMax = 24;
@@ -253,32 +334,40 @@ void applyCloudStreamProfile(const char *profile, bool persist) {
     cloudJpegQuality = min<uint8_t>(24, max<uint8_t>(18, cloudJpegQuality));
     cloudMaxFramesInFlight = 2;
   } else if (strcmp(nextProfile, "quality") == 0) {
-    cloudFrameIntervalMs = 140;
-    cloudFrameAckTimeoutMs = 2500;
+    cloudFrameIntervalMs = 70;
+    cloudFrameIntervalMinMs = 70;
+    cloudFrameIntervalMaxMs = 200;
+    cloudFrameAckTimeoutMs = 1800;
     cloudJpegQualityMin = 10;
     cloudJpegQualityMax = 20;
     cloudFrameTargetBytes = 50000;
-    cloudFrameTargetAckMs = 420;
-    cloudJpegQuality = min<uint8_t>(18, max<uint8_t>(12, cloudJpegQuality));
-    cloudMaxFramesInFlight = 1;
+    cloudFrameTargetAckMs = 220;
+    cloudJpegQuality = 13;
+    cloudMaxFramesInFlight = 2;
   } else {
-    cloudFrameIntervalMs = 90;
+    cloudFrameIntervalMs = 80;
+    cloudFrameIntervalMinMs = 80;
+    cloudFrameIntervalMaxMs = 190;
     cloudFrameAckTimeoutMs = 1800;
     cloudJpegQualityMin = 12;
-    cloudJpegQualityMax = 22;
-    cloudFrameTargetBytes = 28000;
-    cloudFrameTargetAckMs = 300;
-    cloudJpegQuality = min<uint8_t>(20, max<uint8_t>(15, cloudJpegQuality));
+    cloudJpegQualityMax = 20;
+    cloudFrameTargetBytes = 42000;
+    cloudFrameTargetAckMs = 250;
+    cloudJpegQuality = 15;
     cloudMaxFramesInFlight = 2;
   }
 
   stableCloudFrameCount = 0;
+  pressuredCloudFrameCount = 0;
   cloudMotionMode = false;
   cloudMotionUntil = 0;
 
-  if (cameraSensor) {
-    cameraSensor->set_framesize(cameraSensor, cloudIdleFrameSize());
-    cameraSensor->set_quality(cameraSensor, cloudJpegQuality);
+  if (cameraSensor && !localStreamActive) {
+    applyCameraSettingsIfChanged(
+      cloudIdleFrameSize(),
+      cloudJpegQuality,
+      true
+    );
   }
 
   if (persist) saveConfig();
@@ -353,10 +442,19 @@ bool setupCamera() {
 
   cameraSensor = esp_camera_sensor_get();
   if (cameraSensor) {
-    cameraSensor->set_framesize(cameraSensor, cloudIdleFrameSize());
-    cameraSensor->set_quality(cameraSensor, cameraHasPsram ? cloudJpegQuality : 16);
+    appliedCameraFrameSize = (int)cam.frame_size;
+    appliedCameraJpegQuality = cam.jpeg_quality;
+    applyCameraSettingsIfChanged(
+      cloudIdleFrameSize(),
+      cameraHasPsram ? cloudJpegQuality : 16,
+      true
+    );
     cameraSensor->set_vflip(cameraSensor, 0);
     cameraSensor->set_hmirror(cameraSensor, 0);
+    cameraSensor->set_brightness(cameraSensor, 0);
+    cameraSensor->set_contrast(cameraSensor, 1);
+    cameraSensor->set_saturation(cameraSensor, 0);
+    cameraSensor->set_sharpness(cameraSensor, 1);
   }
 
   Serial.println("Camera init OK");
@@ -366,6 +464,8 @@ bool setupCamera() {
 bool setupCameraWithRetry(uint8_t maxAttempts) {
   for (uint8_t attempt = 1; attempt <= maxAttempts; attempt++) {
     cameraSensor = nullptr;
+    appliedCameraFrameSize = -1;
+    appliedCameraJpegQuality = -1;
     if (attempt > 1) {
       esp_camera_deinit();
       delay(150);
@@ -424,6 +524,7 @@ void handleCapture() {
     server.send(500, "text/plain", "Capture failed");
     return;
   }
+  cameraFramesCaptured++;
 
   server.sendHeader("Content-Type", "image/jpeg");
   server.sendHeader("Content-Length", String(fb->len));
@@ -444,25 +545,73 @@ void handleStream() {
   Serial.println(server.client().remoteIP());
 
   WiFiClient client = server.client();
+  client.setNoDelay(true);
+  client.setTimeout(2000);
   String response = "HTTP/1.1 200 OK\r\n";
   response += "Access-Control-Allow-Origin: *\r\n";
   response += "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n";
   client.print(response);
 
+  localStreamActive = true;
+  const framesize_t localFrameSize = cameraHasPsram
+    ? FRAMESIZE_VGA
+    : FRAMESIZE_QVGA;
+  const uint8_t localJpegQuality = cameraHasPsram ? 13 : 16;
+  applyCameraSettingsIfChanged(localFrameSize, localJpegQuality, true);
+  uint32_t localFrames = 0;
+  unsigned long localStatsAt = millis();
+
   while (client.connected()) {
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
-      delay(30);
+      delay(1);
       continue;
     }
 
-    client.printf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
-    client.write(fb->buf, fb->len);
-    client.print("\r\n");
+    cameraFramesCaptured++;
+    const size_t frameBytes = fb->len;
+    const size_t headerBytes = client.printf(
+      "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
+      frameBytes
+    );
+    const size_t imageBytes = headerBytes > 0
+      ? client.write(fb->buf, frameBytes)
+      : 0;
+    const size_t trailerBytes = imageBytes == frameBytes
+      ? client.print("\r\n")
+      : 0;
     esp_camera_fb_return(fb);
-    delay(45);
+
+    if (imageBytes != frameBytes || trailerBytes == 0) break;
+    localFrames++;
+
+    const unsigned long now = millis();
+    if (now - localStatsAt >= 3000) {
+      const float localFps =
+        (localFrames * 1000.0f) / (now - localStatsAt);
+      Serial.printf(
+        "Camera local | resolution=%s FPS=%.1f Q=%u RSSI=%d dBm\n",
+        cameraFrameSizeName(localFrameSize),
+        localFps,
+        localJpegQuality,
+        WiFi.RSSI()
+      );
+      localFrames = 0;
+      localStatsAt = now;
+    }
+
+    processVehicleUart();
+    sendVehicleUartStatus();
+    if (webSocketStarted) webSocket.loop();
+    yield();
+    delay(1);
   }
 
+  localStreamActive = false;
+  const framesize_t cloudFrameSize = cloudMotionMode
+    ? cloudMotionFrameSize()
+    : cloudIdleFrameSize();
+  applyCameraSettingsIfChanged(cloudFrameSize, cloudJpegQuality, true);
   Serial.println("Stream client disconnected");
 }
 
@@ -502,15 +651,6 @@ void sendDeviceLog(const char *level, const String &message) {
   webSocket.sendTXT(payload);
 }
 
-void persistWifiCandidate(const char *state) {
-  prefs.begin("fpv-cam", false);
-  prefs.putString("candidateSsid", wifiCandidateSsid);
-  prefs.putString("candidatePass", wifiCandidatePass);
-  prefs.putString("candidateCmd", wifiTransactionCommandId);
-  prefs.putString("candidateState", state);
-  prefs.end();
-}
-
 void clearPersistedWifiCandidate() {
   prefs.begin("fpv-cam", false);
   prefs.remove("candidateSsid");
@@ -520,38 +660,65 @@ void clearPersistedWifiCandidate() {
   prefs.end();
 }
 
+void clearSavedWifiCredentials() {
+  prefs.begin("fpv-cam", false);
+  prefs.remove("wifiSsid");
+  prefs.remove("wifiPass");
+  prefs.end();
+}
+
+bool cameraWifiTransactionActive() {
+  return cameraWifiPhase != CameraWifiPhase::Idle;
+}
+
+bool cameraWifiSwitching() {
+  return
+    cameraWifiPhase == CameraWifiPhase::Ready ||
+    cameraWifiPhase == CameraWifiPhase::CandidateScheduled ||
+    cameraWifiPhase == CameraWifiPhase::ConnectingCandidate ||
+    cameraWifiPhase == CameraWifiPhase::RollbackScheduled ||
+    cameraWifiPhase == CameraWifiPhase::ConnectingRollback;
+}
+
 void clearWifiTransaction() {
+  cameraWifiPhase = CameraWifiPhase::Idle;
   wifiTransactionCommandId = "";
   wifiCandidateSsid = "";
   wifiCandidatePass = "";
   wifiActiveSsid = "";
   wifiActivePass = "";
-  wifiTransactionPrepared = false;
-  wifiTransactionArmed = false;
-  wifiCandidateConnected = false;
-  wifiFallbackInProgress = false;
+  wifiFailureAckSent = false;
   wifiTransactionStartedAt = 0;
-  wifiSwitchPending = false;
-  wifiSwitchInProgress = false;
+  wifiSwitchAt = 0;
+  wifiSwitchStartedAt = 0;
+  lastWifiSwitchRetryAt = 0;
   clearPersistedWifiCandidate();
-}
-
-void restoreActiveWifi(const char *reason) {
-  if (wifiActiveSsid.length() == 0) return;
-  Serial.print("Restoring active WiFi: ");
-  Serial.println(reason);
-  strlcpy(config.wifiSsid, wifiActiveSsid.c_str(), sizeof(config.wifiSsid));
-  strlcpy(config.wifiPass, wifiActivePass.c_str(), sizeof(config.wifiPass));
-  wifiFallbackInProgress = true;
-  wifiCandidateConnected = false;
-  wifiSwitchPending = true;
-  wifiSwitchAt = millis() + 300;
 }
 
 void sendVehicleUartDocument(JsonDocument &doc) {
   serializeJson(doc, vehicleUart);
   vehicleUart.write('\n');
   vehicleUart.flush();
+}
+
+const char *cameraWifiStateName() {
+  switch (cameraWifiPhase) {
+    case CameraWifiPhase::Ready:
+      return "ready";
+    case CameraWifiPhase::CandidateScheduled:
+    case CameraWifiPhase::ConnectingCandidate:
+      return "switching";
+    case CameraWifiPhase::Candidate:
+      return "candidate";
+    case CameraWifiPhase::RollbackScheduled:
+    case CameraWifiPhase::ConnectingRollback:
+      return "rollback";
+    case CameraWifiPhase::Failed:
+      return "failed";
+    case CameraWifiPhase::Idle:
+    default:
+      return "idle";
+  }
 }
 
 void sendVehicleUartStatus(bool force) {
@@ -571,16 +738,9 @@ void sendVehicleUartStatus(bool force) {
     now - lastCloudFrameSentAt < 5000;
   doc["rssi"] = WiFi.isConnected() ? WiFi.RSSI() : -100;
   doc["ssid"] = WiFi.isConnected() ? WiFi.SSID() : "";
-  doc["wifiState"] = wifiFallbackInProgress
-    ? "rollback"
-    : (wifiSwitchPending || wifiSwitchInProgress)
-      ? "switching"
-      : wifiCandidateConnected
-        ? "candidate"
-        : wifiTransactionPrepared
-          ? "prepared"
-          : "idle";
+  doc["wifiState"] = cameraWifiStateName();
   doc["targetSsid"] = wifiCandidateSsid;
+  doc["flashOn"] = flashOn;
   sendVehicleUartDocument(doc);
 }
 
@@ -593,6 +753,7 @@ void sendVehicleWifiAck(
 ) {
   JsonDocument doc;
   doc["type"] = "wifi_ack";
+  doc["protocol"] = 2;
   doc["commandId"] = commandId;
   doc["phase"] = phase;
   doc["ok"] = ok;
@@ -600,7 +761,6 @@ void sendVehicleWifiAck(
   doc["message"] = message;
   sendVehicleUartDocument(doc);
 }
-
 bool applyUartProvision(JsonDocument &doc) {
   const char *ssid = doc["ssid"] | "";
   String requestId = doc["requestId"] | "";
@@ -615,6 +775,9 @@ bool applyUartProvision(JsonDocument &doc) {
   strlcpy(config.vehicleId, doc["vehicleId"] | config.vehicleId, sizeof(config.vehicleId));
   strlcpy(config.authToken, doc["authToken"] | config.authToken, sizeof(config.authToken));
   strlcpy(config.controlUrl, doc["controlUrl"] | config.controlUrl, sizeof(config.controlUrl));
+  if (!doc["lightOn"].isNull()) {
+    setCameraFlash(doc["lightOn"].as<bool>());
+  }
   saveConfig();
 
   JsonDocument ack;
@@ -656,6 +819,10 @@ bool applyVehicleConfigSync(JsonDocument &doc) {
   if (hasConfig && ssid.length() == 0) {
     sendVehicleConfigSyncAck(false, false, "vehicle sync omitted WiFi SSID");
     return false;
+  }
+
+  if (!doc["lightOn"].isNull()) {
+    setCameraFlash(doc["lightOn"].as<bool>());
   }
 
   bool changed = false;
@@ -711,15 +878,18 @@ bool applyVehicleConfigSync(JsonDocument &doc) {
 void handleVehicleWifiAction(JsonDocument &doc) {
   String action = doc["action"] | "";
   String commandId = doc["commandId"] | "";
+  const int protocol = doc["protocol"] | 0;
   if (commandId.length() == 0) return;
 
   Serial.printf(
-    "Vehicle WiFi UART action: action=%s command=%s\n",
+    "Vehicle WiFi UART action: action=%s command=%s protocol=%d\n",
     action.c_str(),
-    commandId.c_str()
+    commandId.c_str(),
+    protocol
   );
 
   if (action == "reset") {
+    clearWifiTransaction();
     prefs.begin("fpv-cam", false);
     prefs.remove("wifiSsid");
     prefs.remove("wifiPass");
@@ -732,32 +902,117 @@ void handleVehicleWifiAction(JsonDocument &doc) {
     Serial.println("Camera WiFi cleared by vehicle UART. Restarting...");
     delay(200);
     ESP.restart();
+    return;
   }
 
-  if (action == "prepare") {
+  if (protocol != 2) {
+    sendVehicleWifiAck(
+      commandId,
+      "failed",
+      false,
+      "",
+      "unsupported WiFi protocol"
+    );
+    return;
+  }
+
+  if (action == "replace") {
     String ssid = doc["ssid"] | "";
     if (ssid.length() == 0) {
-      sendVehicleWifiAck(commandId, "prepared", false, "", "missing WiFi SSID");
+      sendVehicleWifiAck(commandId, "failed", false, "", "missing WiFi SSID");
       return;
     }
+
     if (
-      wifiTransactionPrepared &&
+      cameraWifiTransactionActive() &&
       wifiTransactionCommandId == commandId &&
       wifiCandidateSsid == ssid
     ) {
-      sendVehicleWifiAck(commandId, "prepared", true, ssid, "camera already prepared");
+      sendVehicleWifiAck(
+        commandId,
+        "ready",
+        true,
+        ssid,
+        "camera already accepted candidate"
+      );
       return;
     }
+
     clearWifiTransaction();
     wifiTransactionCommandId = commandId;
     wifiCandidateSsid = ssid;
     wifiCandidatePass = String(doc["password"] | "");
     wifiActiveSsid = config.wifiSsid;
     wifiActivePass = config.wifiPass;
-    wifiTransactionPrepared = true;
+    clearSavedWifiCredentials();
+    const unsigned long delayMs = constrain(
+      (unsigned long)(doc["delayMs"] | 3000),
+      1500UL,
+      6000UL
+    );
+    cameraWifiPhase = CameraWifiPhase::CandidateScheduled;
+    wifiSwitchAt = millis() + delayMs;
     wifiTransactionStartedAt = millis();
-    persistWifiCandidate("prepared");
-    sendVehicleWifiAck(commandId, "prepared", true, ssid, "camera stored WiFi candidate over UART");
+    sendVehicleWifiAck(
+      commandId,
+      "ready",
+      true,
+      ssid,
+      "camera accepted candidate and scheduled WiFi switch"
+    );
+    Serial.print("Camera candidate received from vehicle: ");
+    Serial.println(ssid);
+    Serial.printf("Camera WiFi switch scheduled in %lu ms.\n", delayMs);
+    return;
+  }
+
+  if (action == "rollback") {
+    String ssid = doc["ssid"] | "";
+    if (ssid.length() == 0) {
+      sendVehicleWifiAck(
+        commandId,
+        "failed",
+        false,
+        "",
+        "rollback omitted previous WiFi"
+      );
+      return;
+    }
+
+    wifiTransactionCommandId = commandId;
+    wifiActiveSsid = ssid;
+    wifiActivePass = String(doc["password"] | "");
+    strlcpy(config.wifiSsid, wifiActiveSsid.c_str(), sizeof(config.wifiSsid));
+    strlcpy(config.wifiPass, wifiActivePass.c_str(), sizeof(config.wifiPass));
+    saveConfig();
+
+    if (
+      WiFi.status() == WL_CONNECTED &&
+      WiFi.SSID() == wifiActiveSsid
+    ) {
+      sendVehicleWifiAck(
+        commandId,
+        "rolled_back",
+        true,
+        wifiActiveSsid,
+        "camera already uses previous WiFi"
+      );
+      clearWifiTransaction();
+      return;
+    }
+
+    unsigned long delayMs =
+      constrain((unsigned long)(doc["delayMs"] | 3000), 500UL, 5000UL);
+    cameraWifiPhase = CameraWifiPhase::RollbackScheduled;
+    wifiSwitchAt = millis() + delayMs;
+    wifiTransactionStartedAt = millis();
+    sendVehicleWifiAck(
+      commandId,
+      "rollback",
+      true,
+      wifiActiveSsid,
+      "camera rollback scheduled"
+    );
     return;
   }
 
@@ -775,67 +1030,90 @@ void handleVehicleWifiAction(JsonDocument &doc) {
     );
     return;
   }
-  if (commandId != wifiTransactionCommandId) return;
-  if (action == "arm") {
-    wifiTransactionArmed = true;
-    wifiTransactionStartedAt = millis();
-    persistWifiCandidate("armed");
-    sendVehicleWifiAck(commandId, "armed", true, wifiCandidateSsid, "camera armed over UART");
-  } else if (action == "switch") {
-    if (!wifiTransactionArmed) {
-      sendVehicleWifiAck(commandId, "switching", false, wifiCandidateSsid, "camera was not armed");
-      return;
-    }
-    if (wifiSwitchPending || wifiSwitchInProgress || wifiCandidateConnected) {
+
+  if (
+    !cameraWifiTransactionActive() ||
+    commandId != wifiTransactionCommandId
+  ) {
+    sendVehicleWifiAck(
+      commandId,
+      "failed",
+      false,
+      "",
+      "camera has no matching WiFi transaction"
+    );
+    return;
+  }
+
+  if (action == "switch") {
+    if (
+      cameraWifiPhase == CameraWifiPhase::CandidateScheduled ||
+      cameraWifiPhase == CameraWifiPhase::ConnectingCandidate ||
+      cameraWifiPhase == CameraWifiPhase::Candidate
+    ) {
       sendVehicleWifiAck(
         commandId,
         "switching",
         true,
         wifiCandidateSsid,
-        "camera switch already scheduled"
+        "camera switch already active"
       );
       return;
     }
-    unsigned long delayMs = constrain((unsigned long)(doc["delayMs"] | 3000), 1500UL, 5000UL);
-    wifiSwitchPending = true;
+    if (cameraWifiPhase != CameraWifiPhase::Ready) {
+      sendVehicleWifiAck(
+        commandId,
+        "failed",
+        false,
+        wifiCandidateSsid,
+        "camera candidate is not ready"
+      );
+      return;
+    }
+
+    unsigned long delayMs =
+      constrain((unsigned long)(doc["delayMs"] | 3000), 500UL, 5000UL);
+    cameraWifiPhase = CameraWifiPhase::CandidateScheduled;
     wifiSwitchAt = millis() + delayMs;
     wifiTransactionStartedAt = millis();
-    sendVehicleWifiAck(commandId, "switching", true, wifiCandidateSsid, "camera switch scheduled");
+    sendVehicleWifiAck(
+      commandId,
+      "switching",
+      true,
+      wifiCandidateSsid,
+      "camera switch scheduled"
+    );
   } else if (action == "commit") {
-    if (!wifiCandidateConnected) return;
+    if (
+      cameraWifiPhase != CameraWifiPhase::Candidate ||
+      WiFi.status() != WL_CONNECTED ||
+      WiFi.SSID() != wifiCandidateSsid
+    ) {
+      sendVehicleWifiAck(
+        commandId,
+        "failed",
+        false,
+        wifiCandidateSsid,
+        "camera has not verified candidate WiFi"
+      );
+      return;
+    }
+
+    strlcpy(config.wifiSsid, wifiCandidateSsid.c_str(), sizeof(config.wifiSsid));
+    strlcpy(config.wifiPass, wifiCandidatePass.c_str(), sizeof(config.wifiPass));
     saveConfig();
     lastCommittedWifiCommandId = commandId;
     lastCommittedWifiSsid = wifiCandidateSsid;
-    sendVehicleWifiAck(commandId, "committed", true, wifiCandidateSsid, "camera committed active WiFi");
+    sendVehicleWifiAck(
+      commandId,
+      "committed",
+      true,
+      wifiCandidateSsid,
+      "camera committed candidate WiFi"
+    );
     clearWifiTransaction();
-  } else if (action == "rollback") {
-    String reason = doc["reason"] | "vehicle requested rollback";
-    if (wifiFallbackInProgress) {
-      sendVehicleWifiAck(
-        commandId,
-        "rollback_started",
-        true,
-        wifiCandidateSsid,
-        "camera rollback already active"
-      );
-      return;
-    }
-    if (wifiCandidateConnected || wifiSwitchInProgress || wifiTransactionArmed) {
-      restoreActiveWifi(reason.c_str());
-      sendVehicleWifiAck(
-        commandId,
-        "rollback_started",
-        true,
-        wifiCandidateSsid,
-        "camera rollback started"
-      );
-    } else {
-      sendVehicleWifiAck(commandId, "rolled_back", true, wifiCandidateSsid, reason);
-      clearWifiTransaction();
-    }
   }
 }
-
 void handleVehicleUartLine(const String &line) {
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, line);
@@ -851,6 +1129,8 @@ void handleVehicleUartLine(const String &line) {
     applyVehicleConfigSync(doc);
   } else if (strcmp(type, "wifi_action") == 0) {
     handleVehicleWifiAction(doc);
+  } else if (strcmp(type, "light_state") == 0) {
+    setCameraFlash(doc["on"] | false);
   }
 }
 
@@ -904,7 +1184,10 @@ void syncConfigFromVehicle(unsigned long timeoutMs) {
   }
 
   if (!vehicleConfigSyncReceived) {
-    Serial.println("Vehicle config sync unavailable; using last-known-good cache.");
+    config.wifiSsid[0] = '\0';
+    config.wifiPass[0] = '\0';
+    clearSavedWifiCredentials();
+    Serial.println("Vehicle config sync unavailable; waiting for vehicle UART.");
   }
 }
 
@@ -941,18 +1224,21 @@ void sendCloudFrameErrorLog(const String &message) {
 }
 
 void setCloudMotionMode(bool active) {
-  if (!cameraHasPsram || !cameraSensor || cloudMotionMode == active) return;
+  if (!cameraHasPsram || cloudMotionMode == active) return;
 
-  const framesize_t previousFrameSize = cloudMotionMode
-    ? cloudMotionFrameSize()
-    : cloudIdleFrameSize();
   cloudMotionMode = active;
   const framesize_t nextFrameSize = cloudMotionMode
     ? cloudMotionFrameSize()
     : cloudIdleFrameSize();
   stableCloudFrameCount = 0;
-  if (nextFrameSize != previousFrameSize) {
-    cameraSensor->set_framesize(cameraSensor, nextFrameSize);
+  pressuredCloudFrameCount = 0;
+
+  const uint8_t modeQualityMin = cloudModeJpegQualityMin();
+  if (cloudJpegQuality < modeQualityMin) {
+    cloudJpegQuality = modeQualityMin;
+  }
+  if (cameraSensor && !localStreamActive) {
+    applyCameraSettingsIfChanged(nextFrameSize, cloudJpegQuality);
   }
 
   Serial.printf(
@@ -963,34 +1249,116 @@ void setCloudMotionMode(bool active) {
 }
 
 void tuneCloudJpegQuality() {
-  if (!cameraHasPsram || !cameraSensor || lastCloudFrameAckMs == 0) return;
+  if (!cameraHasPsram || !cameraSensor) return;
 
-  uint8_t nextQuality = cloudJpegQuality;
+  const bool ackAdvanced = cloudFrameAcks != cloudAcksAtLastTune;
+  const bool timeoutAdvanced =
+    cloudFrameAckTimeouts != cloudTimeoutsAtLastTune;
+  const bool dropAdvanced = cloudFramesDropped != cloudDropsAtLastTune;
+  const bool rejectAdvanced = cloudFramesRejected != cloudRejectsAtLastTune;
+  if (!ackAdvanced && !timeoutAdvanced && !dropAdvanced && !rejectAdvanced) {
+    return;
+  }
+
+  cloudAcksAtLastTune = cloudFrameAcks;
+  cloudTimeoutsAtLastTune = cloudFrameAckTimeouts;
+  cloudDropsAtLastTune = cloudFramesDropped;
+  cloudRejectsAtLastTune = cloudFramesRejected;
+
+  const uint8_t pendingFrames = pendingCloudFrameAckCount();
+  const bool veryBad =
+    timeoutAdvanced ||
+    lastCloudFrameAckMs > 300 ||
+    lastCloudFrameSendMs > 250;
   const bool overloaded =
+    veryBad ||
+    dropAdvanced ||
+    rejectAdvanced ||
     lastCloudFrameBytes > cloudFrameTargetBytes ||
-    lastCloudFrameAckMs > cloudFrameTargetAckMs;
+    lastCloudFrameAckMs > cloudFrameTargetAckMs ||
+    lastCloudFrameSendMs > 120 ||
+    pendingFrames >= cloudMaxFramesInFlight;
   const bool stable =
-    lastCloudFrameBytes < cloudFrameTargetBytes * 3 / 4 &&
-    lastCloudFrameAckMs < cloudFrameTargetAckMs * 3 / 4;
+    ackAdvanced &&
+    !overloaded &&
+    lastCloudFrameAckMs > 0 &&
+    lastCloudFrameAckMs < 120 &&
+    lastCloudFrameBytes < cloudFrameTargetBytes * 4 / 5 &&
+    lastCloudFrameSendMs < 80 &&
+    pendingFrames < cloudMaxFramesInFlight;
 
   if (overloaded) {
     stableCloudFrameCount = 0;
-    nextQuality = min<uint8_t>(cloudJpegQualityMax, cloudJpegQuality + 2);
+    pressuredCloudFrameCount = min<uint8_t>(
+      20,
+      pressuredCloudFrameCount + (veryBad || rejectAdvanced ? 2 : 1)
+    );
   } else if (stable) {
-    stableCloudFrameCount++;
-    if (stableCloudFrameCount >= 8 && cloudJpegQuality > cloudJpegQualityMin) {
-      stableCloudFrameCount = 0;
-      nextQuality = cloudJpegQuality - 1;
-    }
+    if (pressuredCloudFrameCount > 0) pressuredCloudFrameCount--;
+    stableCloudFrameCount = min<uint8_t>(20, stableCloudFrameCount + 1);
   } else {
     stableCloudFrameCount = 0;
+    pressuredCloudFrameCount = 0;
   }
 
-  if (nextQuality != cloudJpegQuality) {
-    cloudJpegQuality = nextQuality;
-    cameraSensor->set_quality(cameraSensor, cloudJpegQuality);
-    Serial.printf("Adaptive JPEG quality changed to %u\n", cloudJpegQuality);
+  const unsigned long now = millis();
+  if (
+    lastCloudAdaptiveAt != 0 &&
+    now - lastCloudAdaptiveAt < CLOUD_ADAPTIVE_COOLDOWN_MS
+  ) {
+    return;
   }
+
+  uint8_t nextQuality = cloudJpegQuality;
+  unsigned long nextInterval = cloudFrameIntervalMs;
+  if (pressuredCloudFrameCount >= 3) {
+    pressuredCloudFrameCount = 0;
+    if (cloudFrameIntervalMs < cloudFrameIntervalMinMs + 30) {
+      nextInterval = min(
+        cloudFrameIntervalMaxMs,
+        cloudFrameIntervalMs + (veryBad ? 15UL : 10UL)
+      );
+    } else if (cloudJpegQuality < cloudJpegQualityMax) {
+      nextQuality = cloudJpegQuality + 1;
+    } else if (cloudFrameIntervalMs < cloudFrameIntervalMaxMs) {
+      nextInterval = min(cloudFrameIntervalMaxMs, cloudFrameIntervalMs + 15UL);
+    }
+  } else if (stableCloudFrameCount >= 12) {
+    stableCloudFrameCount = 0;
+    const uint8_t qualityFloor = cloudModeJpegQualityMin();
+    if (cloudJpegQuality > qualityFloor) {
+      nextQuality = cloudJpegQuality - 1;
+    } else if (cloudFrameIntervalMs > cloudFrameIntervalMinMs) {
+      nextInterval = max(
+        cloudFrameIntervalMinMs,
+        cloudFrameIntervalMs - 5UL
+      );
+    }
+  }
+
+  if (
+    nextQuality == cloudJpegQuality &&
+    nextInterval == cloudFrameIntervalMs
+  ) {
+    return;
+  }
+
+  cloudJpegQuality = nextQuality;
+  cloudFrameIntervalMs = nextInterval;
+  lastCloudAdaptiveAt = now;
+  if (!localStreamActive) {
+    const framesize_t frameSize = cloudMotionMode
+      ? cloudMotionFrameSize()
+      : cloudIdleFrameSize();
+    applyCameraSettingsIfChanged(frameSize, cloudJpegQuality);
+  }
+  Serial.printf(
+    "Camera adaptive | interval=%lu ms Q=%u pressure=%u stable=%u\n",
+    cloudFrameIntervalMs,
+    cloudJpegQuality,
+    pressuredCloudFrameCount,
+    stableCloudFrameCount
+  );
 }
 
 void clearPendingCloudFrameAcks() {
@@ -1007,6 +1375,7 @@ uint8_t pendingCloudFrameAckCount() {
 }
 
 void expirePendingCloudFrameAcks(unsigned long now) {
+  bool expired = false;
   for (uint8_t index = 0; index < CLOUD_PENDING_FRAME_SLOTS; index++) {
     if (
       pendingCloudFrameIds[index] != 0 &&
@@ -1015,8 +1384,10 @@ void expirePendingCloudFrameAcks(unsigned long now) {
       pendingCloudFrameIds[index] = 0;
       pendingCloudFrameSentAt[index] = 0;
       cloudFrameAckTimeouts++;
+      expired = true;
     }
   }
+  if (expired) tuneCloudJpegQuality();
 }
 
 void trackPendingCloudFrameAck(uint32_t frameId, unsigned long sentAt) {
@@ -1044,22 +1415,19 @@ bool completePendingCloudFrameAck(
 
 void sendCloudFrame() {
   if (!cameraReady || !wsConnected) return;
-  if (
-    wifiTransactionPrepared ||
-    wifiSwitchPending ||
-    wifiSwitchInProgress ||
-    wifiFallbackInProgress
-  ) {
-    return;
-  }
+  if (cameraWifiSwitching()) return;
 
   const unsigned long now = millis();
   expirePendingCloudFrameAcks(now);
-  // A two-frame pipeline can cover one cloud RTT without allowing an
-  // unbounded ordered TCP queue. The quality profile stays at one frame.
-  if (pendingCloudFrameAckCount() >= cloudMaxFramesInFlight) return;
   if (now - lastFrameAt < cloudFrameIntervalMs) return;
   lastFrameAt = now;
+  // Skip this capture slot when the small ACK window is full. There is no
+  // JPEG queue, so the next available slot always captures the newest frame.
+  if (pendingCloudFrameAckCount() >= cloudMaxFramesInFlight) {
+    cloudFramesDropped++;
+    tuneCloudJpegQuality();
+    return;
+  }
 
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
@@ -1071,6 +1439,8 @@ void sendCloudFrame() {
       sendDeviceLog("error", "Camera frame buffer stalled; starting recovery");
       cameraReady = false;
       cameraSensor = nullptr;
+      appliedCameraFrameSize = -1;
+      appliedCameraJpegQuality = -1;
       esp_camera_deinit();
       lastCameraRecoveryAt = 0;
       consecutiveFrameCaptureFailures = 0;
@@ -1078,10 +1448,13 @@ void sendCloudFrame() {
     return;
   }
   consecutiveFrameCaptureFailures = 0;
+  cameraFramesCaptured++;
 
   const size_t frameBytes = fb->len;
   const uint32_t frameId = cloudFrameSequence + 1;
+  const unsigned long sendStartedAt = millis();
   const bool sent = webSocket.sendBIN(fb->buf, frameBytes);
+  lastCloudFrameSendMs = millis() - sendStartedAt;
   esp_camera_fb_return(fb);
 
   if (sent) {
@@ -1091,6 +1464,8 @@ void sendCloudFrame() {
     lastCloudFrameBytes = frameBytes;
     cloudFramesSent++;
   } else {
+    cloudFramesDropped++;
+    tuneCloudJpegQuality();
     sendCloudFrameErrorLog("Cloud frame skipped: WebSocket send failed");
   }
 }
@@ -1136,9 +1511,19 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
       }
 
       lastCloudFrameAckMs = frameRoundTripMs;
-      cloudFrameAcks++;
       if (doc["accepted"] | false) {
+        cloudFrameAcks++;
         tuneCloudJpegQuality();
+      } else {
+        const char *reason = doc["reason"] | "";
+        if (
+          strcmp(reason, "frame_interval") == 0 ||
+          strcmp(reason, "frame_too_large") == 0 ||
+          strcmp(reason, "invalid_jpeg") == 0
+        ) {
+          cloudFramesRejected++;
+          tuneCloudJpegQuality();
+        }
       }
       return;
     }
@@ -1170,17 +1555,7 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
       if (strcmp(action, "NETWORK_RECONNECT") == 0) {
         WiFi.reconnect();
       } else if (strcmp(action, "WIFI_PORTAL_OPEN") == 0) {
-        sendDeviceLog("info", "Restarting camera for shared WiFi setup");
-        prefs.begin("fpv-cam", false);
-        prefs.remove("wifiSsid");
-        prefs.remove("wifiPass");
-        prefs.remove("candidateSsid");
-        prefs.remove("candidatePass");
-        prefs.remove("candidateCmd");
-        prefs.remove("candidateState");
-        prefs.end();
-        delay(150);
-        ESP.restart();
+        sendDeviceLog("info", "Camera is waiting for vehicle UART WiFi reset");
       }
     }
     return;
@@ -1236,10 +1611,7 @@ void setupRoutes() {
   server.on("/capture", handleCapture);
   server.on("/stream", handleStream);
   server.on("/flash", []() {
-    flashOn = !flashOn;
-    digitalWrite(FLASH_LED_PIN, flashOn ? HIGH : LOW);
-    Serial.print("Flash ");
-    Serial.println(flashOn ? "ON" : "OFF");
+    setCameraFlash(!flashOn);
     server.send(200, "text/plain", flashOn ? "flash on" : "flash off");
   });
 
@@ -1344,7 +1716,7 @@ void maintainWiFiConnection(unsigned long now) {
     return;
   }
 
-  if (wifiSwitchPending || wifiSwitchInProgress || strlen(config.wifiSsid) == 0) {
+  if (cameraWifiSwitching() || strlen(config.wifiSsid) == 0) {
     return;
   }
 
@@ -1370,9 +1742,7 @@ void maintainCamera(unsigned long now) {
   if (
     cameraReady ||
     WiFi.status() != WL_CONNECTED ||
-    wifiSwitchPending ||
-    wifiSwitchInProgress ||
-    wifiFallbackInProgress ||
+    cameraWifiSwitching() ||
     (lastCameraRecoveryAt > 0 && now - lastCameraRecoveryAt < CAMERA_RECOVERY_INTERVAL_MS)
   ) {
     return;
@@ -1418,6 +1788,9 @@ void setup() {
   sendVehicleUartStatus(true);
   clearPersistedWifiCandidate();
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect(false, true);
+  delay(50);
   Serial.print("ESP32-CAM WiFi MAC: ");
   Serial.println(WiFi.macAddress());
   if (!isValidCloudStreamProfile(config.streamProfile)) {
@@ -1452,16 +1825,45 @@ void loop() {
     ESP.restart();
   }
 
-  if (wifiSwitchPending && (long)(millis() - wifiSwitchAt) >= 0) {
-    wifiSwitchPending = false;
-    wifiSwitchInProgress = true;
-    wifiSwitchStartedAt = millis();
-    lastWifiSwitchRetryAt = wifiSwitchStartedAt;
-    if (wifiTransactionArmed && !wifiFallbackInProgress) {
-      strlcpy(config.wifiSsid, wifiCandidateSsid.c_str(), sizeof(config.wifiSsid));
-      strlcpy(config.wifiPass, wifiCandidatePass.c_str(), sizeof(config.wifiPass));
+  if (
+    !vehicleConfigSyncReceived &&
+    vehicleConfigSyncRequestId.length() > 0 &&
+    now - lastVehicleConfigRequestAt >= 1000
+  ) {
+    lastVehicleConfigRequestAt = now;
+    requestVehicleConfigSync();
+  }
+
+  if (
+    (
+      cameraWifiPhase == CameraWifiPhase::CandidateScheduled ||
+      cameraWifiPhase == CameraWifiPhase::RollbackScheduled
+    ) &&
+    (long)(now - wifiSwitchAt) >= 0
+  ) {
+    const bool rollingBack =
+      cameraWifiPhase == CameraWifiPhase::RollbackScheduled;
+    if (!rollingBack) {
+      strlcpy(
+        config.wifiSsid,
+        wifiCandidateSsid.c_str(),
+        sizeof(config.wifiSsid)
+      );
+      strlcpy(
+        config.wifiPass,
+        wifiCandidatePass.c_str(),
+        sizeof(config.wifiPass)
+      );
+      cameraWifiPhase = CameraWifiPhase::ConnectingCandidate;
+    } else {
+      cameraWifiPhase = CameraWifiPhase::ConnectingRollback;
     }
-    Serial.println("Switching ESP32-CAM to the newly saved WiFi...");
+
+    wifiSwitchStartedAt = now;
+    lastWifiSwitchRetryAt = now;
+    resetCloudConnectionForWifiChange();
+    Serial.print("Switching ESP32-CAM WiFi to: ");
+    Serial.println(config.wifiSsid);
     beginStaConnection(config.wifiSsid, config.wifiPass, true);
   }
 
@@ -1469,45 +1871,67 @@ void loop() {
   maintainCamera(now);
   sendCloudFrame();
 
-  if (wifiSwitchInProgress) {
-    if (
+  const bool connectingCandidate =
+    cameraWifiPhase == CameraWifiPhase::ConnectingCandidate;
+  const bool connectingRollback =
+    cameraWifiPhase == CameraWifiPhase::ConnectingRollback;
+  if (connectingCandidate || connectingRollback) {
+    const bool targetConnected =
       WiFi.status() == WL_CONNECTED &&
-      WiFi.SSID() == String(config.wifiSsid)
-    ) {
-      wifiSwitchInProgress = false;
-      Serial.println("ESP32-CAM connected to the new WiFi.");
-      if (wifiFallbackInProgress) {
-        wifiCandidateConnected = false;
-      } else if (wifiTransactionArmed) {
-        wifiCandidateConnected = true;
-      }
-    } else if (millis() - wifiSwitchStartedAt > WIFI_SWITCH_TIMEOUT_MS) {
-      wifiSwitchInProgress = false;
-      if (!wifiFallbackInProgress && wifiTransactionArmed) {
-        restoreActiveWifi("candidate connection timed out");
+      WiFi.SSID() == String(config.wifiSsid);
+
+    if (targetConnected) {
+      if (connectingCandidate) {
+        cameraWifiPhase = CameraWifiPhase::Candidate;
+        wifiTransactionStartedAt = now;
+        wifiFailureAckSent = false;
+        Serial.println("ESP32-CAM joined candidate WiFi.");
       } else {
-        Serial.println("Active WiFi recovery failed. Restarting...");
+        sendVehicleWifiAck(
+          wifiTransactionCommandId,
+          "rolled_back",
+          true,
+          wifiActiveSsid,
+          "camera restored previous WiFi"
+        );
+        clearWifiTransaction();
+      }
+      sendVehicleUartStatus(true);
+    } else if (now - wifiSwitchStartedAt > WIFI_SWITCH_TIMEOUT_MS) {
+      if (connectingCandidate) {
+        cameraWifiPhase = CameraWifiPhase::Failed;
+        if (!wifiFailureAckSent) {
+          wifiFailureAckSent = true;
+          sendVehicleWifiAck(
+            wifiTransactionCommandId,
+            "failed",
+            false,
+            wifiCandidateSsid,
+            "camera could not join selected WiFi"
+          );
+        }
+      } else {
+        Serial.println("Camera could not restore previous WiFi. Restarting...");
         ESP.restart();
       }
-    } else if (millis() - lastWifiSwitchRetryAt >= WIFI_SWITCH_RETRY_INTERVAL_MS) {
-      lastWifiSwitchRetryAt = millis();
-      Serial.print("Retrying WiFi switch: ");
+    } else if (
+      now - lastWifiSwitchRetryAt >= WIFI_SWITCH_RETRY_INTERVAL_MS
+    ) {
+      lastWifiSwitchRetryAt = now;
+      Serial.print("Retrying camera WiFi: ");
       Serial.println(config.wifiSsid);
       beginStaConnection(config.wifiSsid, config.wifiPass, true);
     }
   }
+
   if (
-    wifiFallbackInProgress &&
-    WiFi.status() == WL_CONNECTED
+    cameraWifiPhase == CameraWifiPhase::Failed &&
+    WiFi.status() == WL_CONNECTED &&
+    WiFi.SSID() == wifiCandidateSsid
   ) {
-    clearWifiTransaction();
-  }
-  if (
-    wifiTransactionArmed &&
-    !wifiFallbackInProgress &&
-    now - wifiTransactionStartedAt > WIFI_COORDINATOR_TIMEOUT_MS
-  ) {
-    restoreActiveWifi("vehicle coordinator timed out");
+    cameraWifiPhase = CameraWifiPhase::Candidate;
+    wifiFailureAckSent = false;
+    sendVehicleUartStatus(true);
   }
   if (cloudMotionMode && (long)(now - cloudMotionUntil) >= 0) {
     setCloudMotionMode(false);
@@ -1516,27 +1940,46 @@ void loop() {
   if (now - lastStatusAt > 3000) {
     const unsigned long statusElapsedMs = lastStatusAt == 0 ? 3000 : now - lastStatusAt;
     const uint32_t framesSinceStatus = cloudFramesSent - cloudFramesAtLastStatus;
+    const uint32_t acksSinceStatus = cloudFrameAcks - cloudAcksAtLastStatus;
+    const uint32_t capturesSinceStatus =
+      cameraFramesCaptured - cameraFramesAtLastStatus;
     const float cloudFps = statusElapsedMs > 0
       ? (framesSinceStatus * 1000.0f) / statusElapsedMs
       : 0.0f;
+    const float ackFps = statusElapsedMs > 0
+      ? (acksSinceStatus * 1000.0f) / statusElapsedMs
+      : 0.0f;
+    const float captureFps = statusElapsedMs > 0
+      ? (capturesSinceStatus * 1000.0f) / statusElapsedMs
+      : 0.0f;
     lastStatusAt = now;
     cloudFramesAtLastStatus = cloudFramesSent;
+    cloudAcksAtLastStatus = cloudFrameAcks;
+    cameraFramesAtLastStatus = cameraFramesCaptured;
     if (wsConnected) {
+      const framesize_t activeFrameSize = cloudMotionMode
+        ? cloudMotionFrameSize()
+        : cloudIdleFrameSize();
       Serial.printf(
-        "Camera cloud online | sent=%lu ack=%lu staleAck=%lu timeout=%lu pending=%u/%u profile=%s mode=%s FPS=%.1f RTT=%lu ms bytes=%u Q=%u RSSI=%d dBm\n",
-        (unsigned long)cloudFramesSent,
-        (unsigned long)cloudFrameAcks,
-        (unsigned long)cloudStaleFrameAcks,
-        (unsigned long)cloudFrameAckTimeouts,
+        "Camera online | mode=%s resolution=%s capture=%.1f FPS cloud=%.1f FPS ack=%.1f FPS RTT=%lu ms send=%lu ms JPEG=%.1f KB Q=%u interval=%lu ms RSSI=%d dBm pending=%u/%u drop=%lu reject=%lu timeout=%lu staleAck=%lu profile=%s\n",
+        cloudMotionMode ? "motion" : "idle",
+        cameraFrameSizeName(activeFrameSize),
+        captureFps,
+        cloudFps,
+        ackFps,
+        lastCloudFrameAckMs,
+        lastCloudFrameSendMs,
+        lastCloudFrameBytes / 1024.0f,
+        cloudJpegQuality,
+        cloudFrameIntervalMs,
+        WiFi.RSSI(),
         pendingCloudFrameAckCount(),
         cloudMaxFramesInFlight,
-        config.streamProfile,
-        cloudMotionMode ? "motion" : "idle",
-        cloudFps,
-        lastCloudFrameAckMs,
-        (unsigned int)lastCloudFrameBytes,
-        cloudJpegQuality,
-        WiFi.RSSI()
+        (unsigned long)cloudFramesDropped,
+        (unsigned long)cloudFramesRejected,
+        (unsigned long)cloudFrameAckTimeouts,
+        (unsigned long)cloudStaleFrameAcks,
+        config.streamProfile
       );
       sendCameraStreamStatus(cloudFps);
     } else {

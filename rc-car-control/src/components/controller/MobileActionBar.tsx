@@ -66,9 +66,10 @@ export default function MobileActionBar({
             ? "scale-95 border-sky-100/80 bg-sky-500/80"
             : "border-sky-200/60 bg-sky-500/40 active:scale-95"
         }`}
+        title="ตั้งกล้องกลับตำแหน่งเริ่มต้น"
       >
         <RotateCcw size={16} />
-        กลาง
+        เริ่ม
       </button>
 
       <button

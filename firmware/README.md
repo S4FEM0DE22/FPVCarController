@@ -71,6 +71,8 @@ UART uses 3.3 V logic. Do not connect either UART pin to 5 V. GPIO13 and GPIO14 
 
 The link runs at `115200 8N1`. The sketches assign UART pins explicitly, so the USB Serial Monitor remains available on the normal programming port.
 
+The vehicle light command is also synchronized over UART. Turning the vehicle light on or off from the controller sets the ESP32-CAM onboard flash LED on `GPIO4` to the same state. ESP32-CAM receives the current light state again during boot configuration sync, so restarting only the camera does not leave the two lights out of sync. Do not use the microSD interface while this flash/UART pin layout is active.
+
 ## Hardware Wi-Fi Reset Button
 
 The vehicle supports a physical shared Wi-Fi reset button on `GPIO32`:
@@ -100,6 +102,27 @@ The horn output is intended for an active 3.3V buzzer: connect buzzer `+` to `GP
 At boot the OLED shows `FPV CAR` while the system starts. A remote reboot shows `RESTARTING`, and the shared Wi-Fi reset shows `RESET WIFI` while both boards are cleared over UART. A physical power cut removes power from the OLED immediately, so showing `POWER OFF` after the switch is turned off requires a separate standby supply or small backup capacitor circuit.
 
 The OLED is optional. If no display is detected at `0x3C`, the vehicle prints a message to Serial Monitor and continues normally. If your module uses address `0x3D`, change `OLED_I2C_ADDRESS` near the top of the selected vehicle sketch.
+
+## 3S Battery Measurement
+
+Both vehicle sketches measure a 3S Li-ion/LiPo pack on `GPIO34` through this divider:
+
+| Connection | Component |
+| --- | --- |
+| Battery positive | `47k ohm` resistor to GPIO34 |
+| GPIO34 | `10k ohm` resistor to GND |
+| GPIO34 | `100nF` ceramic capacitor to GND (recommended) |
+| Battery negative | Common GND |
+
+Never connect the battery directly to GPIO34. A `12.6V` full pack produces about `2.21V` at GPIO34 with this divider. The firmware uses calibrated ADC millivolts, rejects the highest and lowest samples, smooths motor-load sag, and converts voltage to percentage with a 3S discharge curve. Insights shows both percent and measured voltage.
+
+Resistor and ADC tolerances still require a one-time multimeter check. Measure the pack at rest, compare it with the voltage shown in Insights, then set `BATTERY_CALIBRATION` in the selected vehicle sketch to:
+
+```text
+multimeter voltage / web voltage
+```
+
+For example, if the multimeter reads `12.30V` and the web reads `12.00V`, use `BATTERY_CALIBRATION = 1.025f`. This percentage curve is not suitable for a 12V lead-acid battery.
 
 ## First-Time Shared Wi-Fi Setup
 
@@ -131,7 +154,7 @@ After saving:
 - The progress page does not report success after the UART save alone. It waits until the vehicle and camera use the selected SSID, the camera sensor is ready, the camera WebSocket reaches the cloud, and a recent JPEG frame has actually been sent.
 - If the password is incorrect, the setup network remains available so the value can be corrected.
 
-On later boots, ESP32-CAM requests the authoritative configuration from the vehicle over UART before starting Wi-Fi. The vehicle replies from its saved Preferences, and the camera updates its local last-known-good cache only when values differ. If UART is temporarily unavailable, the camera can still use that cache; if the vehicle reports that it has no saved Wi-Fi, the camera clears stale credentials and waits for first-time provisioning.
+On later boots, ESP32-CAM requests the authoritative configuration from the vehicle over UART before starting Wi-Fi. The vehicle replies from its saved Preferences. If UART is temporarily unavailable, the camera stays offline and keeps requesting the vehicle configuration instead of using an independent Wi-Fi choice. This guarantees that both boards always receive the same network.
 
 ## ESP32 Vehicle Setup
 
@@ -152,7 +175,7 @@ On later boots, ESP32-CAM requests the authoritative configuration from the vehi
 
 Each vehicle variant is a complete standalone sketch. Open and flash only the file that matches the motor driver installed on the car.
 
-When powered on, both variants first hold motor inputs low, then run the Servo test sequence and return to `pan=95`, `tilt=64`. Automatic motor testing is disabled so the vehicle cannot drive unexpectedly at startup. Test motors only after the vehicle is secured and the wheels are lifted.
+When powered on, both variants first hold motor inputs low, then run the Servo test sequence and return to `pan=95`, `tilt=12`. Pan keeps its `15-175` servo range and displays the centered `95` position as `0 degrees`. Tilt uses a `12-110` servo range: the lowest `12` position is the startup/home position and displays as `0 degrees`, while the unchanged upper limit displays as `98 degrees`. Automatic motor testing is disabled so the vehicle cannot drive unexpectedly at startup. Test motors only after the vehicle is secured and the wheels are lifted.
 
 ## ESP32-CAM Setup
 
@@ -171,7 +194,7 @@ The web app stores this camera URL in `localStorage`, so it keeps working after 
 
 Camera initialization is retried three times during boot. If initialization still fails, the firmware retries periodically while Wi-Fi remains available. Five consecutive frame-buffer failures trigger an automatic camera deinit/init cycle. A Wi-Fi change also resets and starts the camera WebSocket again, so recovering video should not require a manual power cycle.
 
-If the saved camera Wi-Fi is unavailable at boot, ESP32-CAM no longer blocks before entering its main loop. It continues in offline recovery mode, retries the saved network, reports status over UART, and can still receive provisioning, reset, rollback, or a later web Wi-Fi transaction from the vehicle.
+If vehicle configuration is unavailable at camera boot, ESP32-CAM enters offline recovery mode, reports status over UART, and requests configuration every second. It starts Wi-Fi only after the vehicle replies or sends first-time provisioning.
 
 The Vehicle tab in Settings provides three persistent cloud stream profiles:
 
@@ -190,15 +213,14 @@ The controller page can change Wi-Fi for both boards from one form:
 - The web app sends `WIFI_SCAN` through the cloud relay. The ESP32 scans nearby 2.4 GHz networks and returns SSID, signal strength, channel, and security status for the selection list.
 - The web app sends one `WIFI_SET` request. The relay forwards that same command only to the main ESP32 and waits for the final result.
 - The main ESP32 is the only Wi-Fi transaction coordinator. It keeps the current credentials as a fallback, forwards the candidate to ESP32-CAM over UART, and decides when both boards switch, verify, commit, or roll back.
-- ESP32-CAM accepts Wi-Fi changes only from the vehicle UART. It acknowledges `prepared`, `armed`, `switching`, and `committed`; the vehicle retries missing UART phases safely.
+- ESP32-CAM accepts Wi-Fi changes only from the vehicle UART. Protocol v2 uses the short sequence `replace -> ready -> switch -> committed`. The camera removes its saved Wi-Fi when it accepts `replace`, tests the candidate only in RAM, and writes it to Preferences only after the vehicle sends `commit`.
 - During the switch, both boards disable reconnect to the previous access point and accept success only when the connected SSID matches the selected network. ESP32-CAM also gives a brief disconnect grace period before restarting association, so a slow hotspot or DHCP response is not interrupted repeatedly.
 - Until the vehicle reports that it accepted the request, the relay retries only the same idempotent `WIFI_SET` command. After acceptance, progress and recovery continue locally even while cloud WebSocket connections restart.
-- Both boards retain their previous active credentials while testing the candidate network.
+- The vehicle retains the previous credentials as the sole rollback source while both boards test the candidate network.
 - The vehicle commits only after it is back on the cloud and a fresh camera UART status confirms the selected SSID, camera cloud connection, initialized sensor, and active JPEG stream.
 - The controller reports success only after the vehicle and camera both acknowledge the local commit.
-- If either board fails to prepare, join the candidate, reconnect to cloud, or produce a camera frame before timeout, the vehicle restores the previous network on both boards over UART. The relay never issues an independent rollback.
-- ESP32-CAM reports its Wi-Fi transaction state over UART and retries candidate association before falling back. The vehicle ignores a temporary old SSID while the camera is still switching, but coordinates an immediate rollback when the camera reports that fallback has started.
-- During a successful web Wi-Fi change, the vehicle Serial Monitor shows camera ACKs for `prepared`, `armed`, `switching`, and `committed`. If one is missing, check the crossed TX/RX wires and common GND from the UART wiring table above.
+- If either board fails to join the candidate, reconnect to cloud, or produce a camera frame before timeout, only the vehicle decides to roll back. Its UART rollback message includes the previous SSID and password, so ESP32-CAM never guesses or selects a different network itself.
+- During a successful web Wi-Fi change, the vehicle Serial Monitor shows camera ACKs for `ready`, `switching`, and `committed`. If one is missing, check the crossed TX/RX wires and common GND from the UART wiring table above.
 - Keep the relay, selected vehicle sketch, and ESP32-CAM sketch on the same release when changing Wi-Fi from the web app.
 - The controller does not need direct access to the camera IP, so the change also works when the browser and car use different networks.
 - Settings compares the SSID and gateway reported by both boards and shows whether they are on the same Wi-Fi.

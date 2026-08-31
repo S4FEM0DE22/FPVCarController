@@ -250,7 +250,7 @@ export default function OperatorStatusPanel({
               <p className="text-[10px] font-semibold uppercase text-slate-500">Camera direction</p>
               <p className="mt-1 text-sm font-bold text-slate-950">{cameraAim.compact}</p>
               <p className="mt-0.5 text-[10px] text-slate-500">
-                ค่ากลาง = 0° · Pan servo {cameraAim.panServoDeg}° · Tilt servo {cameraAim.tiltServoDeg}°
+                Pan ตรง = 0° · Tilt ก้มสุด = 0° · Servo {cameraAim.panServoDeg}°/{cameraAim.tiltServoDeg}°
               </p>
             </div>
           </div>

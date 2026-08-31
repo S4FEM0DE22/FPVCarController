@@ -8,8 +8,8 @@ const CAMERA_STEP = 6;
 const PAN_CENTER = 95;
 const PAN_MIN = 15;
 const PAN_MAX = 175;
-const TILT_CENTER = 64;
-const TILT_MIN = 30;
+const TILT_HOME = 12;
+const TILT_MIN = 12;
 const TILT_MAX = 110;
 const MOVE_HEARTBEAT_INTERVAL_MS = 250;
 
@@ -162,7 +162,7 @@ export function handleAction(
   }
 
   if (action === "CAM_RESET") {
-    setCameraOrientation({ pan: PAN_CENTER, tilt: TILT_CENTER });
+    setCameraOrientation({ pan: PAN_CENTER, tilt: TILT_HOME });
   }
 
   if (action === "CAMERA_TOGGLE") {

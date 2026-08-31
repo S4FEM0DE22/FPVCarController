@@ -351,8 +351,8 @@ export default function CameraPanel({
                 className={`grid h-10 w-10 place-items-center rounded-md border text-white transition active:scale-95 ${
                   activeQuickAction === "cameraReset" ? "border-sky-200 bg-sky-500" : "border-white/20 bg-slate-950/70"
                 }`}
-                title="ตั้งกล้องกลับกึ่งกลาง"
-                aria-label="ตั้งกล้องกลับกึ่งกลาง"
+                title="ตั้งกล้องกลับตำแหน่งเริ่มต้น"
+                aria-label="ตั้งกล้องกลับตำแหน่งเริ่มต้น"
               >
                 <RotateCcw size={17} />
               </button>

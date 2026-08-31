@@ -55,6 +55,7 @@ export interface VehicleTelemetry {
   vehicleId: string;
   online: boolean;
   battery: number;
+  batteryVoltage?: number;
   wifi: number;
   wifiSsid?: string;
   wifiGateway?: string;

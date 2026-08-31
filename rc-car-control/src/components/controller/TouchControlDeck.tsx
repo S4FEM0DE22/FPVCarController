@@ -168,10 +168,10 @@ export default function TouchControlDeck({
               ? "border-sky-300 bg-sky-500 text-white"
               : "border-slate-200 bg-slate-50 text-slate-700"
           }`}
-          title="ตั้งกล้องกลับกึ่งกลาง"
+          title="ตั้งกล้องกลับตำแหน่งเริ่มต้น"
         >
           <RotateCcw size={16} />
-          กลาง
+          เริ่ม
         </button>
         <button
           type="button"
