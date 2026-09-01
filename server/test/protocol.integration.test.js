@@ -221,18 +221,20 @@ test("control forwarding sends command to esp peer", async () => {
   const controller = await connectClient(url);
 
   try {
+    const espAck = waitForMessage(esp, (msg) => msg.type === "ack");
     sendJson(esp, { type: "identify", clientType: "esp", vehicleId });
-    await waitForMessage(esp, (msg) => msg.type === "ack");
+    await espAck;
 
+    const controllerAck = waitForMessage(
+      controller,
+      (msg) => msg.type === "ack" && /Controller registered/.test(msg.message)
+    );
     sendJson(controller, {
       type: "identify",
       clientType: "web-controller",
       vehicleId,
     });
-    await waitForMessage(
-      controller,
-      (msg) => msg.type === "ack" && /Controller registered/.test(msg.message)
-    );
+    await controllerAck;
 
     const commandId = `cmd-${Date.now()}`;
     const forwardedMessage = waitForMessage(
