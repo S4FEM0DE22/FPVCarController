@@ -10,10 +10,26 @@ ESP32 vehicle ──────┼─ WebSocket relay ── vehicle commands/t
 ESP32-CAM ──────────┘                    └─ JPEG camera frames
 ```
 
-- `rc-car-control/` — เว็บควบคุม Next.js
-- `server/` — Node.js WebSocket relay
-- `firmware/` — firmware รถและกล้อง
-- `docs/AZURE_LINUX_VM_TH.md` — deployment หลักบน Azure Linux VM
+```text
+FPVCarController/
+├── rc-car-control/                 # เว็บควบคุม Next.js
+│   └── src/
+│       ├── app/                    # หน้าเว็บและ route
+│       ├── components/controller/  # UI ควบคุมรถและกล้อง
+│       ├── hooks/                  # input, socket และ runtime state
+│       ├── lib/                    # protocol และ control logic
+│       └── types/                  # shared TypeScript types
+├── server/                         # Node.js WebSocket relay และ tests
+├── firmware/
+│   ├── esp32-vehicle-a4950/        # firmware รถที่ใช้ A4950
+│   ├── esp32-vehicle-tb6612/       # firmware รถที่ใช้ TB6612FNG
+│   └── esp32-cam/                  # firmware ESP32-CAM
+├── docs/                           # คู่มือติดตั้งและ deploy
+├── .github/workflows/              # CI
+└── ecosystem.config.cjs            # PM2 บน Azure Linux VM
+```
+
+ไฟล์ build, dependencies, environment secrets, editor settings และไฟล์แนบจากเครื่องพัฒนาไม่ถูกเก็บใน Git
 
 Azure App Service ไม่ได้ใช้งานแล้ว โปรเจกต์ production ใช้ Linux VM เครื่องเดียว โดย Nginx ส่ง `/` ไปเว็บและ `/ws` ไป relay
 

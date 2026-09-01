@@ -229,7 +229,7 @@ If the new Wi-Fi credentials are incorrect, both boards automatically reconnect 
 
 The relay treats the camera as offline after about 10 seconds without a frame or stream-status message. It clears the cached frame at the same time, preventing the controller from showing a stale online state after camera power is removed.
 
-Deploy the updated relay and flash the updated `esp32-vehicle.ino` before using the scan list. Older relay or firmware versions do not understand `wifi_scan_result`.
+Deploy the updated relay and flash the vehicle sketch matching the installed motor driver before using the scan list. Older relay or firmware versions do not understand `wifi_scan_result`.
 
 ## Vehicle Tuning
 

@@ -38,6 +38,7 @@ Thumbs.db
 # Codex/local agent metadata
 .agents/
 .codex/
+.codex-remote-attachments/
 
 # Arduino temporary folders
 *.tmp
