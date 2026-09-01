@@ -235,6 +235,11 @@ test("control forwarding sends command to esp peer", async () => {
     );
 
     const commandId = `cmd-${Date.now()}`;
+    const forwardedMessage = waitForMessage(
+      esp,
+      (msg) => msg.type === "control" && msg.commandId === commandId
+    );
+
     sendJson(controller, {
       type: "control",
       vehicleId,
@@ -248,10 +253,7 @@ test("control forwarding sends command to esp peer", async () => {
       commandId,
     });
 
-    const forwarded = await waitForMessage(
-      esp,
-      (msg) => msg.type === "control" && msg.commandId === commandId
-    );
+    const forwarded = await forwardedMessage;
     assert.equal(forwarded.command, "FORWARD");
     assert.deepEqual(forwarded.payload, { throttle: 1, steering: 0 });
 
