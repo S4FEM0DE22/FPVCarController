@@ -39,7 +39,7 @@ interface PendingCameraFrame {
 }
 
 const CAMERA_PAN_CENTER = 95;
-const CAMERA_TILT_HOME = 12;
+const CAMERA_TILT_HOME = 52;
 const MAX_DEVICE_LOGS = 120;
 const WIFI_SCAN_TIMEOUT_MS = 20000;
 const CAMERA_CONFIRM_TIMEOUT_MS = 1800;

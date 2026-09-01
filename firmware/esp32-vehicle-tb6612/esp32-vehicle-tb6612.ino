@@ -63,7 +63,7 @@ static const char *DEVICE_AP_PASSWORD = "12345678";
 // Safe limits for small plastic-gear 180-degree servos.
 static const int SERVO_PAN_MIN = 15;
 static const int SERVO_PAN_MAX = 175;
-static const int SERVO_TILT_MIN = 12;
+static const int SERVO_TILT_MIN = 52;
 static const int SERVO_TILT_MAX = 110;
 static const int SERVO_PAN_CENTER = 95;
 static const int SERVO_TILT_HOME = SERVO_TILT_MIN;
@@ -325,7 +325,7 @@ void updateOled(bool force) {
     cameraUartSsid.length() > 0 &&
     WiFi.SSID() == cameraUartSsid;
   const int panOffset = panDeg - SERVO_PAN_CENTER;
-  const int tiltAngle = tiltDeg - SERVO_TILT_MIN;
+  const int tiltOffset = tiltDeg - SERVO_TILT_HOME;
   const String headerState = setupApActive
     ? String("SETUP")
     : wifiSynced
@@ -343,7 +343,8 @@ void updateOled(bool force) {
   if (panOffset >= 0) driveLine += "+";
   driveLine += String(panOffset);
   driveLine += "  T";
-  driveLine += String(tiltAngle);
+  if (tiltOffset >= 0) driveLine += "+";
+  driveLine += String(tiltOffset);
 
   oled.clearDisplay();
   oled.setTextSize(1);

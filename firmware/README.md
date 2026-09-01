@@ -175,7 +175,7 @@ On later boots, ESP32-CAM requests the authoritative configuration from the vehi
 
 Each vehicle variant is a complete standalone sketch. Open and flash only the file that matches the motor driver installed on the car.
 
-When powered on, both variants first hold motor inputs low, then run the Servo test sequence and return to `pan=95`, `tilt=12`. Pan keeps its `15-175` servo range and displays the centered `95` position as `0 degrees`. Tilt uses a `12-110` servo range: the lowest `12` position is the startup/home position and displays as `0 degrees`, while the unchanged upper limit displays as `98 degrees`. Automatic motor testing is disabled so the vehicle cannot drive unexpectedly at startup. Test motors only after the vehicle is secured and the wheels are lifted.
+When powered on, both variants first hold motor inputs low, then run the Servo test sequence and return to `pan=95`, `tilt=52`. Pan keeps its `15-175` servo range and displays the centered `95` position as `0 degrees`. The direct-drive tilt mechanism was level near servo `64`; its `52-110` range therefore starts about 12 degrees downward and keeps the previous upper limit. The startup/home position at `52` displays as `0 degrees`, and higher values display as up from that driving view. Automatic motor testing is disabled so the vehicle cannot drive unexpectedly at startup. Test motors only after the vehicle is secured and the wheels are lifted.
 
 ## ESP32-CAM Setup
 

@@ -45,7 +45,7 @@ export function actionLabel(action: string) {
 }
 
 const CAMERA_PAN_CENTER_DEG = 95;
-const CAMERA_TILT_HOME_DEG = 12;
+const CAMERA_TILT_HOME_DEG = 52;
 
 function formatAxisOffset(
   value: number,
@@ -64,9 +64,9 @@ export function formatCameraAim(pan: number, tilt: number) {
   const panServoDeg = Math.round(pan);
   const tiltServoDeg = Math.round(tilt);
   const panOffsetDeg = Math.round(panServoDeg - CAMERA_PAN_CENTER_DEG);
-  const tiltOffsetDeg = Math.max(0, Math.round(tiltServoDeg - CAMERA_TILT_HOME_DEG));
+  const tiltOffsetDeg = Math.round(tiltServoDeg - CAMERA_TILT_HOME_DEG);
   const panDeg = Math.abs(panOffsetDeg);
-  const tiltDeg = tiltOffsetDeg;
+  const tiltDeg = Math.abs(tiltOffsetDeg);
   const panLabel = formatAxisOffset(
     panServoDeg,
     CAMERA_PAN_CENTER_DEG,
@@ -74,7 +74,10 @@ export function formatCameraAim(pan: number, tilt: number) {
     "ขวา",
     "ตรง"
   );
-  const tiltLabel = tiltDeg === 0 ? "ก้มสุด 0°" : `เงย ${tiltDeg}°`;
+  const tiltLabel =
+    tiltOffsetDeg === 0
+      ? "เริ่ม 0°"
+      : `${tiltOffsetDeg > 0 ? "เงย" : "ก้ม"} ${tiltDeg}°`;
 
   return {
     panDeg,
