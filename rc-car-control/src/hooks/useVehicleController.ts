@@ -10,6 +10,7 @@ import {
 import { getVehicleStateAfterStatus } from "@/lib/vehicleStateMachine";
 import useVehicleSocket from "@/hooks/useVehicleSocket";
 import { VEHICLE_CONFIG } from "@/constants/network";
+import { setCameraFrameSource } from "@/lib/cameraFrameStore";
 import type {
   ActionCommand,
   ControlCommand,
@@ -18,6 +19,7 @@ import type {
 import type {
   CameraStreamStatusMessage,
   IncomingMessage,
+  WifiUpdateStatusMessage,
   WifiNetwork,
 } from "@/types/socket";
 
@@ -31,11 +33,17 @@ export interface DeviceLogEntry {
   message: string;
 }
 
+interface PendingCameraFrame {
+  frame: ArrayBuffer;
+  acknowledge: (displayed: boolean) => void;
+}
+
 const CAMERA_PAN_CENTER = 95;
-const CAMERA_TILT_CENTER = 64;
+const CAMERA_TILT_HOME = 52;
 const MAX_DEVICE_LOGS = 120;
 const WIFI_SCAN_TIMEOUT_MS = 20000;
 const CAMERA_CONFIRM_TIMEOUT_MS = 1800;
+const CAMERA_FRESHNESS_TIMEOUT_MS = 12000;
 const CAMERA_POSITION_ACTIONS = new Set<ActionCommand>([
   "CAM_LEFT",
   "CAM_RIGHT",
@@ -58,7 +66,7 @@ const initialTelemetry: VehicleTelemetry = {
   },
   lightOn: false,
   cameraPan: 95,
-  cameraTilt: 64,
+  cameraTilt: CAMERA_TILT_HOME,
   failure: null,
   vehicleState: "offline",
 };
@@ -94,10 +102,9 @@ export default function useVehicleController() {
   const [cameraOrientation, setCameraOrientation] =
     useState<CameraOrientation>({
       pan: CAMERA_PAN_CENTER,
-      tilt: CAMERA_TILT_CENTER,
-  });
+      tilt: CAMERA_TILT_HOME,
+    });
   const [telemetry, setTelemetry] = useState<VehicleTelemetry>(initialTelemetry);
-  const [cameraFrameSrc, setCameraFrameSrc] = useState("");
   const [cameraOnline, setCameraOnline] = useState(false);
   const [cameraStreamStatus, setCameraStreamStatus] =
     useState<CameraStreamStatusMessage | null>(null);
@@ -105,22 +112,26 @@ export default function useVehicleController() {
   const [wifiNetworks, setWifiNetworks] = useState<WifiNetwork[]>([]);
   const [wifiScanState, setWifiScanState] = useState<WifiScanState>("idle");
   const [wifiScanError, setWifiScanError] = useState("");
+  const [wifiUpdateStatus, setWifiUpdateStatus] =
+    useState<WifiUpdateStatusMessage | null>(null);
   const lastSentKeyRef = useRef<string>("");
+  const lastMoveSentAtRef = useRef(0);
   const pendingToggleActionsRef = useRef<Set<string>>(new Set());
   const pendingToggleTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const wifiScanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const pendingCameraUntilRef = useRef(0);
   const cameraFrameUrlRef = useRef("");
-  const pendingCameraFrameRef = useRef<ArrayBuffer | null>(null);
+  const pendingCameraFrameRef = useRef<PendingCameraFrame | null>(null);
   const cameraFrameDecodingRef = useRef(false);
   const cameraDecoderRef = useRef<HTMLImageElement | null>(null);
   const cameraDecoderUrlRef = useRef("");
   const cameraFrameDisposedRef = useRef(false);
+  const cameraLastSeenAtRef = useRef(0);
 
   const replaceCameraFrame = useCallback((nextSrc: string) => {
     const previousSrc = cameraFrameUrlRef.current;
     cameraFrameUrlRef.current = nextSrc;
-    setCameraFrameSrc(nextSrc);
+    setCameraFrameSource(nextSrc);
 
     if (previousSrc.startsWith("blob:")) {
       window.setTimeout(() => URL.revokeObjectURL(previousSrc), 1000);
@@ -130,13 +141,15 @@ export default function useVehicleController() {
   const decodeLatestCameraFrame = useCallback(function decodeLatestFrame() {
     if (cameraFrameDecodingRef.current || cameraFrameDisposedRef.current) return;
 
-    const frame = pendingCameraFrameRef.current;
-    if (!frame) return;
+    const pendingFrame = pendingCameraFrameRef.current;
+    if (!pendingFrame) return;
 
     pendingCameraFrameRef.current = null;
     cameraFrameDecodingRef.current = true;
 
-    const nextUrl = URL.createObjectURL(new Blob([frame], { type: "image/jpeg" }));
+    const nextUrl = URL.createObjectURL(
+      new Blob([pendingFrame.frame], { type: "image/jpeg" })
+    );
     const decoder = new Image();
     decoder.decoding = "async";
     cameraDecoderRef.current = decoder;
@@ -153,6 +166,7 @@ export default function useVehicleController() {
       } else {
         URL.revokeObjectURL(nextUrl);
       }
+      pendingFrame.acknowledge(publish && !cameraFrameDisposedRef.current);
 
       cameraFrameDecodingRef.current = false;
       if (pendingCameraFrameRef.current && !cameraFrameDisposedRef.current) {
@@ -166,9 +180,17 @@ export default function useVehicleController() {
   }, [replaceCameraFrame]);
 
   const handleBinaryCameraFrame = useCallback(
-    (frame: ArrayBuffer) => {
+    (
+      frame: ArrayBuffer,
+      delivery: { acknowledge: (displayed: boolean) => void }
+    ) => {
+      cameraLastSeenAtRef.current = Date.now();
       setCameraOnline(true);
-      pendingCameraFrameRef.current = frame;
+      pendingCameraFrameRef.current?.acknowledge(false);
+      pendingCameraFrameRef.current = {
+        frame,
+        acknowledge: delivery.acknowledge,
+      };
       decodeLatestCameraFrame();
     },
     [decodeLatestCameraFrame]
@@ -180,6 +202,7 @@ export default function useVehicleController() {
     return () => {
       cameraFrameDisposedRef.current = true;
       pendingCameraFrameRef.current = null;
+      setCameraFrameSource("");
       const decoder = cameraDecoderRef.current;
       if (decoder) {
         decoder.onload = null;
@@ -243,7 +266,10 @@ export default function useVehicleController() {
           vehicleId: message.vehicleId,
           online: nextOnline,
           battery: message.battery,
+          batteryVoltage: message.batteryVoltage,
           wifi: message.wifi,
+          wifiSsid: message.wifiSsid ?? prev.wifiSsid,
+          wifiGateway: message.wifiGateway ?? prev.wifiGateway,
           latency: message.latency,
           cameraOn,
           driveState: nextDriveState,
@@ -259,11 +285,13 @@ export default function useVehicleController() {
     }
 
     if (message.type === "camera_frame") {
+      cameraLastSeenAtRef.current = Date.now();
       setCameraOnline(true);
       replaceCameraFrame(`data:image/${message.format || "jpeg"};base64,${message.data}`);
     }
 
     if (message.type === "camera_status") {
+      cameraLastSeenAtRef.current = message.online ? Date.now() : 0;
       setCameraOnline(message.online);
       if (!message.online) {
         replaceCameraFrame("");
@@ -272,6 +300,7 @@ export default function useVehicleController() {
     }
 
     if (message.type === "camera_stream_status") {
+      cameraLastSeenAtRef.current = Date.now();
       setCameraOnline(true);
       setCameraStreamStatus(message);
     }
@@ -299,6 +328,14 @@ export default function useVehicleController() {
       setWifiNetworks(networks);
       setWifiScanError(message.error || "");
       setWifiScanState(message.error ? "error" : "ready");
+    }
+
+    if (message.type === "wifi_update_status") {
+      setWifiUpdateStatus(message);
+      if (message.state === "failed" || !message.ok) {
+        setStatusState("error");
+      }
+      setStatusMessage(message.message || `WiFi update: ${message.state}`);
     }
 
     if (message.type === "status") {
@@ -339,10 +376,36 @@ export default function useVehicleController() {
     pendingAckCount,
     lastPongAgeMs,
     sendRaw,
+    waitForAck,
   } = useVehicleSocket({
     onMessage: handleSocketMessage,
     onCameraFrame: handleBinaryCameraFrame,
   });
+
+  useEffect(() => {
+    if (connectionState !== "CONNECTED") {
+      cameraLastSeenAtRef.current = 0;
+      setCameraOnline(false);
+      setCameraStreamStatus(null);
+      replaceCameraFrame("");
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      const lastSeenAt = cameraLastSeenAtRef.current;
+      if (
+        lastSeenAt > 0 &&
+        Date.now() - lastSeenAt > CAMERA_FRESHNESS_TIMEOUT_MS
+      ) {
+        cameraLastSeenAtRef.current = 0;
+        setCameraOnline(false);
+        setCameraStreamStatus(null);
+        replaceCameraFrame("");
+      }
+    }, 2000);
+
+    return () => window.clearInterval(timer);
+  }, [connectionState, replaceCameraFrame]);
 
   const handleMove = useCallback(
     (
@@ -357,6 +420,7 @@ export default function useVehicleController() {
           setTelemetry,
           setCameraOrientation,
           lastSentKeyRef,
+          lastMoveSentAtRef,
           sendRaw,
         },
         command,
@@ -385,13 +449,14 @@ export default function useVehicleController() {
         pendingCameraUntilRef.current = Date.now() + CAMERA_CONFIRM_TIMEOUT_MS;
       }
 
-      handleVehicleAction(
+      return handleVehicleAction(
         {
           setLastCommand,
           setLastAction: setLastActionWithTimestamp,
           setTelemetry,
           setCameraOrientation,
           lastSentKeyRef,
+          lastMoveSentAtRef,
           sendRaw,
           pendingToggleActionsRef,
           pendingToggleTimeoutRef,
@@ -457,6 +522,15 @@ export default function useVehicleController() {
       handleAction(action, CONTROL_SOURCE.system, payload);
     },
     [handleAction]
+  );
+
+  const handleSystemActionWithAck = useCallback(
+    (action: ActionCommand, payload?: Record<string, unknown>) => {
+      if (action === "WIFI_SET") setWifiUpdateStatus(null);
+      const message = handleAction(action, CONTROL_SOURCE.system, payload);
+      return waitForAck(message.commandId);
+    },
+    [handleAction, waitForAck]
   );
 
   const requestWifiScan = useCallback(() => {
@@ -558,11 +632,11 @@ export default function useVehicleController() {
     wifiNetworks,
     wifiScanState,
     wifiScanError,
+    wifiUpdateStatus,
     lastCommand,
     lastAction,
     lastActionAt,
     cameraOrientation,
-    cameraFrameSrc,
     cameraOnline,
     cameraStreamStatus,
     connectionState,
@@ -580,6 +654,7 @@ export default function useVehicleController() {
     handleTouchMove,
     handleTouchAction,
     handleSystemAction,
+    handleSystemActionWithAck,
     requestWifiScan,
     handleEmergencyStop,
   };

@@ -12,9 +12,11 @@ import {
 } from "lucide-react";
 
 import VideoStream from "@/components/controller/VideoStream";
+import { useCameraFrameAvailable } from "@/lib/cameraFrameStore";
 import {
   driveStateLabel,
   formatCameraAim,
+  trackPowerFromDrive,
   trackPowerFromCommand,
 } from "@/components/controller/controlPanelDisplay";
 
@@ -22,9 +24,10 @@ interface CameraPanelProps {
   isMobile: boolean;
   cameraEnabled?: boolean;
   streamUrl?: string;
-  frameSrc?: string;
   lastCommand?: string;
   lastAction?: string;
+  driveThrottle?: number;
+  driveSteering?: number;
   actionPressed?: boolean;
   cameraPan?: number;
   cameraTilt?: number;
@@ -77,8 +80,9 @@ export default function CameraPanel({
   isMobile,
   cameraEnabled = true,
   streamUrl = "",
-  frameSrc = "",
   lastCommand = "STOP",
+  driveThrottle,
+  driveSteering,
   cameraPan = 95,
   cameraTilt = 64,
   connectionState = "DISCONNECTED",
@@ -100,16 +104,17 @@ export default function CameraPanel({
   inputModeLabel = "CONTROL",
   controlGuideItems = [],
 }: CameraPanelProps) {
+  const frameAvailable = useCameraFrameAvailable();
   const [statusByUrl, setStatusByUrl] = useState<Record<string, StreamStatus>>({});
   const [showGuide, setShowGuide] = useState(false);
   const [pressedQuickAction, setPressedQuickAction] = useState<"horn" | "cameraReset" | null>(null);
   const activeQuickAction = pressedQuickAction ?? externalPressedQuickAction;
   const isHttpStreamUrl = /^https?:\/\//i.test(streamUrl);
   const effectiveStreamUrl = cameraEnabled && isHttpStreamUrl ? streamUrl : "";
-  const effectiveFrameSrc = cameraEnabled && frameSrc ? frameSrc : "";
+  const effectiveFrameAvailable = cameraEnabled && frameAvailable;
   const streamStatus: StreamStatus = !cameraEnabled
     ? "camera-off"
-    : effectiveFrameSrc
+    : effectiveFrameAvailable
     ? "live"
     : !streamUrl
     ? "no-url"
@@ -117,7 +122,10 @@ export default function CameraPanel({
     ? "invalid-url"
     : statusByUrl[streamUrl] ?? "connecting";
   const streamMeta = streamStatusMeta(streamStatus);
-  const trackPower = trackPowerFromCommand(lastCommand);
+  const trackPower =
+    typeof driveThrottle === "number" && typeof driveSteering === "number"
+      ? trackPowerFromDrive(driveThrottle, driveSteering)
+      : trackPowerFromCommand(lastCommand);
   const driveLabel = driveStateLabel(trackPower.left, trackPower.right);
   const cameraAim = formatCameraAim(cameraPan, cameraTilt);
   const cloudConnected = connectionState === "CONNECTED";
@@ -138,10 +146,9 @@ export default function CameraPanel({
       }`}
       aria-label="ภาพจากกล้องและคำสั่งด่วน"
     >
-      {(effectiveFrameSrc || effectiveStreamUrl) && (
+      {(effectiveFrameAvailable || effectiveStreamUrl) && (
         <VideoStream
           streamUrl={effectiveStreamUrl}
-          frameSrc={effectiveFrameSrc}
           cameraOn={cameraEnabled}
           className="absolute inset-0 h-full w-full object-cover"
           onStreamLoad={() => markStream("live")}
@@ -344,8 +351,8 @@ export default function CameraPanel({
                 className={`grid h-10 w-10 place-items-center rounded-md border text-white transition active:scale-95 ${
                   activeQuickAction === "cameraReset" ? "border-sky-200 bg-sky-500" : "border-white/20 bg-slate-950/70"
                 }`}
-                title="ตั้งกล้องกลับกึ่งกลาง"
-                aria-label="ตั้งกล้องกลับกึ่งกลาง"
+                title="ตั้งกล้องกลับตำแหน่งเริ่มต้น"
+                aria-label="ตั้งกล้องกลับตำแหน่งเริ่มต้น"
               >
                 <RotateCcw size={17} />
               </button>

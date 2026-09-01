@@ -8,9 +8,10 @@ const CAMERA_STEP = 6;
 const PAN_CENTER = 95;
 const PAN_MIN = 15;
 const PAN_MAX = 175;
-const TILT_CENTER = 64;
-const TILT_MIN = 30;
+const TILT_HOME = 52;
+const TILT_MIN = 52;
 const TILT_MAX = 110;
+const MOVE_HEARTBEAT_INTERVAL_MS = 250;
 
 export interface CameraOrientation {
   pan: number;
@@ -23,6 +24,7 @@ interface CreateVehicleControllerOptions {
   setTelemetry: Dispatch<SetStateAction<VehicleTelemetry>>;
   setCameraOrientation: Dispatch<SetStateAction<CameraOrientation>>;
   lastSentKeyRef: MutableRefObject<string>;
+  lastMoveSentAtRef: MutableRefObject<number>;
   sendRaw: (payload: ReturnType<typeof buildControlMessage> | ReturnType<typeof buildActionMessage>) => boolean;
   pendingToggleActionsRef?: MutableRefObject<Set<string>>;
   pendingToggleTimeoutRef?: MutableRefObject<NodeJS.Timeout | null>;
@@ -65,23 +67,57 @@ export function handleMove(
   source: ControlSource,
   payload?: Record<string, unknown>
 ) {
-  const { setLastCommand, setTelemetry, lastSentKeyRef, sendRaw } = options;
+  const {
+    setLastCommand,
+    setTelemetry,
+    lastSentKeyRef,
+    lastMoveSentAtRef,
+    sendRaw,
+  } = options;
+  const finalPayload = payload ?? commandToDrivePayload(command);
+  const throttle =
+    typeof finalPayload.throttle === "number"
+      ? Math.max(-1, Math.min(1, finalPayload.throttle))
+      : 0;
+  const steering =
+    typeof finalPayload.steering === "number"
+      ? Math.max(-1, Math.min(1, finalPayload.steering))
+      : 0;
 
   setLastCommand(command);
 
   setTelemetry((prev) => ({
     ...prev,
     vehicleState: getVehicleStateAfterMove(command, prev.online, prev.vehicleState),
+    driveState: {
+      ...prev.driveState,
+      command,
+      throttle,
+      steering,
+    },
   }));
 
-  const finalPayload = payload ?? commandToDrivePayload(command);
-  const payloadKey = JSON.stringify(finalPayload);
+  // Keep the transmitted values identical to the values shown in telemetry.
+  // This prevents tuning or joystick values from being displayed one way and
+  // sent to the vehicle another way.
+  const controlPayload = {
+    ...finalPayload,
+    throttle,
+    steering,
+  };
+  const payloadKey = JSON.stringify(controlPayload);
   const dedupeKey = `${command}:${source}:${payloadKey}`;
 
-  if (dedupeKey === lastSentKeyRef.current) return;
+  const now = Date.now();
+  const heartbeatDue =
+    command !== "STOP" &&
+    now - lastMoveSentAtRef.current >= MOVE_HEARTBEAT_INTERVAL_MS;
+
+  if (dedupeKey === lastSentKeyRef.current && !heartbeatDue) return;
 
   lastSentKeyRef.current = dedupeKey;
-  sendRaw(buildControlMessage(command, source, finalPayload));
+  lastMoveSentAtRef.current = command === "STOP" ? 0 : now;
+  sendRaw(buildControlMessage(command, source, controlPayload));
 }
 
 export function handleAction(
@@ -126,7 +162,7 @@ export function handleAction(
   }
 
   if (action === "CAM_RESET") {
-    setCameraOrientation({ pan: PAN_CENTER, tilt: TILT_CENTER });
+    setCameraOrientation({ pan: PAN_CENTER, tilt: TILT_HOME });
   }
 
   if (action === "CAMERA_TOGGLE") {
@@ -167,5 +203,7 @@ export function handleAction(
     }
   }
 
-  sendRaw(buildActionMessage(action, source, payload));
+  const message = buildActionMessage(action, source, payload);
+  sendRaw(message);
+  return message;
 }

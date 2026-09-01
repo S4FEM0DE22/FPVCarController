@@ -70,15 +70,16 @@ export default function ControllerPage() {
     handleTouchMove,
     handleTouchAction,
     handleSystemAction,
+    handleSystemActionWithAck,
     handleEmergencyStop,
     cameraOrientation,
-    cameraFrameSrc,
     cameraOnline,
     cameraStreamStatus,
     deviceLogs,
     wifiNetworks,
     wifiScanState,
     wifiScanError,
+    wifiUpdateStatus,
     requestWifiScan,
   } = useVehicleController();
 
@@ -181,28 +182,7 @@ export default function ControllerPage() {
   const profileName = telemetry.behaviorProfile?.name || softCodeProfile.name;
 
   const handleSharedWifiChange = async (ssid: string, password: string) => {
-    handleSystemAction("WIFI_SET", { ssid, password });
-
-    if (!cameraStreamUrl) return;
-
-    const cameraUrl = new URL(cameraStreamUrl);
-    const body = new URLSearchParams({
-      ssid,
-      password,
-      controlUrl: `${window.location.origin}/controller`,
-    });
-
-    const response = await fetch(`${cameraUrl.origin}/api/wifi`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body,
-    });
-
-    if (!response.ok) {
-      throw new Error("ESP32-CAM WiFi update failed");
-    }
+    await handleSystemActionWithAck("WIFI_SET", { ssid, password });
   };
 
   const controlGuide = [
@@ -256,7 +236,6 @@ export default function ControllerPage() {
           cameraOn={telemetry.cameraOn}
           lightOn={telemetry.lightOn}
           streamUrl={cameraStreamUrl}
-          frameSrc={cameraFrameSrc}
           connectionState={connectionState}
           vehicleOnline={telemetry.online}
           battery={telemetry.battery}
@@ -340,8 +319,9 @@ export default function ControllerPage() {
                   isMobile={isMobile}
                   cameraEnabled={telemetry.cameraOn}
                   streamUrl={cameraStreamUrl}
-                  frameSrc={cameraFrameSrc}
                   lastCommand={lastCommand}
+                  driveThrottle={telemetry.driveState.throttle}
+                  driveSteering={telemetry.driveState.steering}
                   lastAction={lastAction}
                   actionPressed={actionPressed}
                   cameraPan={cameraPanDeg}
@@ -409,6 +389,8 @@ export default function ControllerPage() {
                       cameraPan={cameraPanDeg}
                       cameraTilt={cameraTiltDeg}
                       lastCommand={lastCommand}
+                      driveThrottle={telemetry.driveState.throttle}
+                      driveSteering={telemetry.driveState.steering}
                       lastAction={lastAction}
                       actionPressed={actionPressed}
                       inputMode={inputMode}
@@ -430,6 +412,8 @@ export default function ControllerPage() {
                       cameraPan={cameraPanDeg}
                       cameraTilt={cameraTiltDeg}
                       lastCommand={lastCommand}
+                      driveThrottle={telemetry.driveState.throttle}
+                      driveSteering={telemetry.driveState.steering}
                       lastAction={lastAction}
                       actionPressed={actionPressed}
                       inputMode={inputMode}
@@ -451,32 +435,37 @@ export default function ControllerPage() {
         onChangeWifi={handleSharedWifiChange}
         vehicleOnline={telemetry.online}
         cameraOnline={cameraOnline}
+        vehicleWifiSsid={telemetry.wifiSsid}
+        vehicleWifiGateway={telemetry.wifiGateway}
+        cameraWifiSsid={cameraStreamStatus?.wifiSsid}
+        cameraWifiGateway={cameraStreamStatus?.wifiGateway}
         cameraStreamProfile={cameraStreamStatus?.profile ?? "balanced"}
         onChangeCameraStreamProfile={async (profile) => {
-          handleSystemAction("CAMERA_STREAM_PROFILE", { profile });
+          await handleSystemActionWithAck("CAMERA_STREAM_PROFILE", { profile });
         }}
         wifiNetworks={wifiNetworks}
         wifiScanState={wifiScanState}
         wifiScanError={wifiScanError}
+        wifiUpdateStatus={wifiUpdateStatus}
         onScanWifi={requestWifiScan}
         onReconnectVehicle={async () => {
-          handleSystemAction("NETWORK_RECONNECT");
+          await handleSystemActionWithAck("NETWORK_RECONNECT");
         }}
         onRebootVehicle={async () => {
-          handleSystemAction("REBOOT");
+          await handleSystemActionWithAck("REBOOT");
         }}
         onOpenWifiPortal={async () => {
-          handleSystemAction("WIFI_PORTAL_OPEN");
+          await handleSystemActionWithAck("WIFI_PORTAL_OPEN");
         }}
         softCodeProfile={softCodeProfile}
         onApplySoftCodeProfile={async (profile) => {
           const normalized = normalizeSoftCodeProfile(profile);
+          await handleSystemActionWithAck("PROFILE_APPLY", { profile: normalized });
           setSoftCodeProfile(normalized);
-          handleSystemAction("PROFILE_APPLY", { profile: normalized });
         }}
         onResetSoftCodeProfile={async () => {
+          await handleSystemActionWithAck("PROFILE_APPLY", { profile: DEFAULT_SOFT_CODE_PROFILE });
           setSoftCodeProfile(DEFAULT_SOFT_CODE_PROFILE);
-          handleSystemAction("PROFILE_APPLY", { profile: DEFAULT_SOFT_CODE_PROFILE });
         }}
         tuning={tuning}
         onChangeTuning={setTuning}

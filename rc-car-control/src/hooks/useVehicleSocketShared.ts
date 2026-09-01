@@ -8,7 +8,13 @@ export type ConnectionState =
 
 export interface UseVehicleSocketOptions {
   onMessage?: (message: import("@/types/socket").IncomingMessage) => void;
-  onCameraFrame?: (frame: ArrayBuffer) => void;
+  onCameraFrame?: (
+    frame: ArrayBuffer,
+    delivery: {
+      frameId: number | null;
+      acknowledge: (displayed: boolean) => void;
+    }
+  ) => void;
 }
 
 const RECONNECT_BASE_DELAY_MS = 750;
@@ -17,8 +23,9 @@ const RECONNECT_JITTER_RATIO = 0.3;
 const MAX_OUTBOUND_QUEUE_SIZE = 200;
 const HEARTBEAT_PONG_TIMEOUT_MS = 45000;
 const HEARTBEAT_PING_INTERVAL_MS = 10000;
-const ACK_TIMEOUT_MS = 5000;
+const ACK_TIMEOUT_MS = 15000;
 const ACK_MAX_RETRIES = 3;
+const WIFI_UPDATE_ACK_TIMEOUT_MS = 130000;
 
 function withJitter(delayMs: number) {
   const jitter = delayMs * RECONNECT_JITTER_RATIO;
@@ -57,6 +64,7 @@ function isAckTrackedMessage(payload: OutgoingMessage): payload is AckTrackedMes
 export {
   ACK_MAX_RETRIES,
   ACK_TIMEOUT_MS,
+  WIFI_UPDATE_ACK_TIMEOUT_MS,
   HEARTBEAT_PING_INTERVAL_MS,
   HEARTBEAT_PONG_TIMEOUT_MS,
   MAX_OUTBOUND_QUEUE_SIZE,

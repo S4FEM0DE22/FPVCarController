@@ -1,13 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { NETWORK_CONFIG } from "@/constants/network";
+import { NETWORK_CONFIG, VEHICLE_ID } from "@/constants/network";
 import { createLogger } from "@/lib/logger";
 import { buildIdentifyMessage, buildPingMessage } from "@/lib/protocol";
 import type { IncomingMessage, OutgoingMessage } from "@/types/socket";
 import {
   ACK_MAX_RETRIES,
   ACK_TIMEOUT_MS,
+  WIFI_UPDATE_ACK_TIMEOUT_MS,
   HEARTBEAT_PING_INTERVAL_MS,
   HEARTBEAT_PONG_TIMEOUT_MS,
   MAX_OUTBOUND_QUEUE_SIZE,
@@ -20,6 +21,11 @@ import {
   type UseVehicleSocketOptions,
 } from "@/hooks/useVehicleSocketShared";
 const socketLogger = createLogger("vehicle-socket");
+
+interface PendingAckPromise {
+  resolve: (message: string) => void;
+  reject: (error: Error) => void;
+}
 
 export default function useVehicleSocket(
   options?: UseVehicleSocketOptions
@@ -34,7 +40,9 @@ export default function useVehicleSocket(
   const reconnectAttemptRef = useRef(0);
   const outboundQueueRef = useRef<OutgoingMessage[]>([]);
   const pendingAckRef = useRef<Map<string, PendingAckEntry>>(new Map());
+  const pendingAckPromiseRef = useRef<Map<string, PendingAckPromise>>(new Map());
   const lastPongAtRef = useRef<number | null>(null);
+  const pendingCameraFrameIdRef = useRef<number | null>(null);
 
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("DISCONNECTED");
@@ -80,6 +88,10 @@ export default function useVehicleSocket(
       }
     }
     pendingAckRef.current.clear();
+    for (const pending of pendingAckPromiseRef.current.values()) {
+      pending.reject(new Error("การเชื่อมต่อถูกปิดก่อนอุปกรณ์ตอบรับคำสั่ง"));
+    }
+    pendingAckPromiseRef.current.clear();
     updatePendingAckCount();
   }, [updatePendingAckCount]);
 
@@ -126,8 +138,17 @@ export default function useVehicleSocket(
         const latest = pendingAckRef.current.get(commandId);
         if (!latest) return;
 
-        if (latest.retries >= ACK_MAX_RETRIES) {
+        const isWifiUpdate =
+          latest.payload.type === "action" && latest.payload.action === "WIFI_SET";
+        const maxRetries = isWifiUpdate ? 0 : ACK_MAX_RETRIES;
+
+        if (latest.retries >= maxRetries) {
           pendingAckRef.current.delete(commandId);
+          const confirmation = pendingAckPromiseRef.current.get(commandId);
+          if (confirmation) {
+            confirmation.reject(new Error("อุปกรณ์ไม่ตอบรับคำสั่งภายในเวลาที่กำหนด"));
+            pendingAckPromiseRef.current.delete(commandId);
+          }
           updatePendingAckCount();
           setLastError(`Command ACK timeout: ${commandId}`);
           socketLogger.error("command ack timeout", {
@@ -156,7 +177,9 @@ export default function useVehicleSocket(
         }
 
         scheduleAckTimeout(commandId);
-      }, ACK_TIMEOUT_MS);
+      }, pending.payload.type === "action" && pending.payload.action === "WIFI_SET"
+        ? WIFI_UPDATE_ACK_TIMEOUT_MS
+        : ACK_TIMEOUT_MS);
     },
     [updatePendingAckCount]
   );
@@ -179,17 +202,24 @@ export default function useVehicleSocket(
   );
 
   const resolveAck = useCallback(
-    (commandId?: string) => {
+    (commandId?: string, errorMessage?: string, message = "อุปกรณ์รับคำสั่งแล้ว") => {
       if (!commandId) return;
 
       const pending = pendingAckRef.current.get(commandId);
-      if (!pending) return;
-
-      if (pending.timeoutId !== null) {
+      if (pending?.timeoutId !== null && pending?.timeoutId !== undefined) {
         window.clearTimeout(pending.timeoutId);
       }
 
       pendingAckRef.current.delete(commandId);
+      const confirmation = pendingAckPromiseRef.current.get(commandId);
+      if (confirmation) {
+        if (errorMessage) {
+          confirmation.reject(new Error(errorMessage));
+        } else {
+          confirmation.resolve(message);
+        }
+        pendingAckPromiseRef.current.delete(commandId);
+      }
       updatePendingAckCount();
     },
     [updatePendingAckCount]
@@ -291,6 +321,14 @@ export default function useVehicleSocket(
     }
   }, [enqueueOutbound, sendOverSocket]);
 
+  const waitForAck = useCallback((commandId: string) => {
+    return new Promise<string>((resolve, reject) => {
+      const previous = pendingAckPromiseRef.current.get(commandId);
+      previous?.reject(new Error("มีคำสั่งใหม่ใช้หมายเลขตอบรับซ้ำ"));
+      pendingAckPromiseRef.current.set(commandId, { resolve, reject });
+    });
+  }, []);
+
   const connect = useCallback(function connectSocket() {
     clearTimers();
     setConnectionState("CONNECTING");
@@ -310,6 +348,7 @@ export default function useVehicleSocket(
       wsRef.current = ws;
 
       ws.onopen = () => {
+        pendingCameraFrameIdRef.current = null;
         reconnectAttemptRef.current = 0;
         setReconnectAttempts(0);
         setConnectionState("CONNECTED");
@@ -325,12 +364,37 @@ export default function useVehicleSocket(
 
       ws.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
-          onCameraFrameRef.current?.(event.data);
+          const frameId = pendingCameraFrameIdRef.current;
+          pendingCameraFrameIdRef.current = null;
+          let acknowledged = false;
+          const acknowledge = (displayed: boolean) => {
+            if (acknowledged || frameId === null) return;
+            acknowledged = true;
+            if (ws.readyState !== WebSocket.OPEN) return;
+            ws.send(JSON.stringify({
+              type: "camera_frame_rendered",
+              vehicleId: VEHICLE_ID,
+              frameId,
+              displayed,
+              timestamp: Date.now(),
+            }));
+          };
+
+          if (onCameraFrameRef.current) {
+            onCameraFrameRef.current(event.data, { frameId, acknowledge });
+          } else {
+            acknowledge(false);
+          }
           return;
         }
 
         try {
           const data = JSON.parse(event.data) as IncomingMessage;
+
+          if (data.type === "camera_frame_meta") {
+            pendingCameraFrameIdRef.current = data.frameId;
+            return;
+          }
 
           if (data.type === "pong") {
             const now = Date.now();
@@ -340,11 +404,11 @@ export default function useVehicleSocket(
           }
 
           if (data.type === "ack") {
-            resolveAck(data.commandId);
+            resolveAck(data.commandId, undefined, data.message);
           }
 
           if (data.type === "error" && typeof data.commandId === "string") {
-            resolveAck(data.commandId);
+            resolveAck(data.commandId, data.message || "อุปกรณ์ปฏิเสธคำสั่ง");
           }
 
           onMessageRef.current?.(data);
@@ -360,6 +424,7 @@ export default function useVehicleSocket(
       };
 
       ws.onclose = (event) => {
+        pendingCameraFrameIdRef.current = null;
         setConnectionState("DISCONNECTED");
         clearTimers();
         setLastPongAgeMs(null);
@@ -442,5 +507,6 @@ export default function useVehicleSocket(
     pendingAckCount,
     lastPongAgeMs,
     sendRaw,
+    waitForAck,
   };
 }

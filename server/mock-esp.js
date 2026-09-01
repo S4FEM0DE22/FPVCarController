@@ -35,9 +35,9 @@ const VEHICLE_ID = "car-001";
 const PAN_MIN = 15;
 const PAN_MAX = 175;
 const PAN_CENTER = 95;
-const TILT_MIN = 30;
+const TILT_MIN = 52;
 const TILT_MAX = 110;
-const TILT_CENTER = 64;
+const TILT_HOME = TILT_MIN;
 const CAMERA_STEP_DEG = 6;
 
 const SIM = {
@@ -100,7 +100,7 @@ const vehicle = {
   lightOn: false,
   cameraOn: true,
   cameraPan: PAN_CENTER,
-  cameraTilt: TILT_CENTER,
+  cameraTilt: TILT_HOME,
   battery: 100,
   wifi: -48,
   behaviorProfile: DEFAULT_PROFILE,
@@ -320,7 +320,7 @@ function applyAction(data) {
 
   if (data.action === "CAM_RESET") {
     vehicle.cameraPan = PAN_CENTER;
-    vehicle.cameraTilt = TILT_CENTER;
+    vehicle.cameraTilt = TILT_HOME;
     return;
   }
 

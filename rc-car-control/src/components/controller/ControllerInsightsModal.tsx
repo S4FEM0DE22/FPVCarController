@@ -253,7 +253,12 @@ export default function ControllerInsightsModal({
                 </div>
                 <div className="rounded-2xl glass-chip p-3">
                   <p className="text-xs text-slate-400">Battery</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-900">{telemetry.battery}%</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-900">
+                    {telemetry.battery}%
+                    {typeof telemetry.batteryVoltage === "number"
+                      ? ` · ${telemetry.batteryVoltage.toFixed(2)} V`
+                      : ""}
+                  </p>
                 </div>
                 <div className="rounded-2xl glass-chip p-3">
                   <p className="text-xs text-slate-400">WiFi</p>

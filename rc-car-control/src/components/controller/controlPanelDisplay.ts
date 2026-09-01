@@ -32,7 +32,7 @@ export function actionLabel(action: string) {
     case "CAM_RIGHT":
       return "Arrow Right";
     case "CAM_RESET":
-      return "R / Cam Reset";
+      return "R / Camera Home";
     case "CAMERA_TOGGLE":
       return "X / Cam Toggle";
     case "LIGHT_TOGGLE":
@@ -45,7 +45,7 @@ export function actionLabel(action: string) {
 }
 
 const CAMERA_PAN_CENTER_DEG = 95;
-const CAMERA_TILT_CENTER_DEG = 64;
+const CAMERA_TILT_HOME_DEG = 52;
 
 function formatAxisOffset(
   value: number,
@@ -64,7 +64,7 @@ export function formatCameraAim(pan: number, tilt: number) {
   const panServoDeg = Math.round(pan);
   const tiltServoDeg = Math.round(tilt);
   const panOffsetDeg = Math.round(panServoDeg - CAMERA_PAN_CENTER_DEG);
-  const tiltOffsetDeg = Math.round(tiltServoDeg - CAMERA_TILT_CENTER_DEG);
+  const tiltOffsetDeg = Math.round(tiltServoDeg - CAMERA_TILT_HOME_DEG);
   const panDeg = Math.abs(panOffsetDeg);
   const tiltDeg = Math.abs(tiltOffsetDeg);
   const panLabel = formatAxisOffset(
@@ -74,13 +74,10 @@ export function formatCameraAim(pan: number, tilt: number) {
     "ขวา",
     "ตรง"
   );
-  const tiltLabel = formatAxisOffset(
-    tiltServoDeg,
-    CAMERA_TILT_CENTER_DEG,
-    "เงย",
-    "ก้ม",
-    "ระดับ"
-  );
+  const tiltLabel =
+    tiltOffsetDeg === 0
+      ? "เริ่ม 0°"
+      : `${tiltOffsetDeg > 0 ? "เงย" : "ก้ม"} ${tiltDeg}°`;
 
   return {
     panDeg,
@@ -93,6 +90,34 @@ export function formatCameraAim(pan: number, tilt: number) {
     tiltLabel,
     summary: `มุมหัน ${panLabel} · มุมก้มเงย ${tiltLabel}`,
     compact: `หัน ${panLabel} · ${tiltLabel}`,
+  };
+}
+
+export function trackPowerFromDrive(
+  throttle: number,
+  steering: number
+): { left: number; right: number } {
+  const safeThrottle = Math.max(-1, Math.min(1, throttle));
+  const safeSteering = Math.max(-1, Math.min(1, steering));
+  // Match the proportional differential mix used by both vehicle firmwares.
+  // Steering changes the two tracks relative to the requested speed instead
+  // of immediately saturating one track at 100%. Use speed magnitude for
+  // reverse motion so the logical LEFT/RIGHT direction stays consistent.
+  let left: number;
+  let right: number;
+  if (Math.abs(safeThrottle) <= 0.02) {
+    left = safeSteering;
+    right = -safeSteering;
+  } else {
+    const steeringMix = safeThrottle < 0 ? -safeSteering : safeSteering;
+    const speedMagnitude = Math.abs(safeThrottle);
+    left = safeThrottle + speedMagnitude * steeringMix;
+    right = safeThrottle - speedMagnitude * steeringMix;
+  }
+
+  return {
+    left: Math.round(Math.max(-1, Math.min(1, left)) * 100),
+    right: Math.round(Math.max(-1, Math.min(1, right)) * 100),
   };
 }
 

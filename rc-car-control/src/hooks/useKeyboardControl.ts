@@ -54,12 +54,36 @@ export default function useKeyboardControl({
     const pressed = pressedRef.current;
     const heldCameraKeys = heldCameraKeysRef.current;
     let cameraRepeatTimer: ReturnType<typeof setInterval> | null = null;
+    let moveRepeatTimer: ReturnType<typeof setInterval> | null = null;
+    let hornRepeatTimer: ReturnType<typeof setInterval> | null = null;
 
     const stopCameraRepeat = () => {
       if (cameraRepeatTimer) {
         clearInterval(cameraRepeatTimer);
         cameraRepeatTimer = null;
       }
+    };
+
+    const stopMoveRepeat = () => {
+      if (moveRepeatTimer) {
+        clearInterval(moveRepeatTimer);
+        moveRepeatTimer = null;
+      }
+    };
+
+    const stopHornRepeat = () => {
+      if (hornRepeatTimer) {
+        clearInterval(hornRepeatTimer);
+        hornRepeatTimer = null;
+      }
+    };
+
+    const startHornRepeat = () => {
+      if (hornRepeatTimer) return;
+      hornRepeatTimer = setInterval(() => {
+        if (pressed.has("KeyH")) onActionRef.current("HORN");
+        else stopHornRepeat();
+      }, 220);
     };
 
     const startCameraRepeat = () => {
@@ -76,7 +100,7 @@ export default function useKeyboardControl({
       }, 180);
     };
 
-    const computeMove = () => {
+    const computeMove = (force = false) => {
       let throttle = 0;
       let steering = 0;
 
@@ -98,7 +122,7 @@ export default function useKeyboardControl({
 
       const key = `${command}:${throttle}:${steering}`;
 
-      if (key === lastKeyRef.current) return;
+      if (!force && key === lastKeyRef.current) return;
 
       lastKeyRef.current = key;
 
@@ -108,10 +132,15 @@ export default function useKeyboardControl({
       });
     };
 
+    moveRepeatTimer = setInterval(() => {
+      if (pressed.size > 0) computeMove(true);
+    }, 250);
+
     const clearAll = () => {
       pressed.clear();
       heldCameraKeys.clear();
       stopCameraRepeat();
+      stopHornRepeat();
       lastKeyRef.current = "";
       onActionPressChangeRef.current?.("HORN", false);
       onActionPressChangeRef.current?.("CAM_RESET", false);
@@ -177,6 +206,8 @@ export default function useKeyboardControl({
         if (e.code === "KeyH") {
           onActionPressChangeRef.current?.("HORN", true);
           onActionRef.current("HORN");
+          pressed.add("KeyH");
+          startHornRepeat();
         }
         if (e.code === "KeyL") onActionRef.current("LIGHT_TOGGLE");
         if (e.code === "KeyR") {
@@ -213,6 +244,8 @@ export default function useKeyboardControl({
         e.preventDefault();
 
         if (e.code === "KeyH") {
+          pressed.delete("KeyH");
+          stopHornRepeat();
           onActionPressChangeRef.current?.("HORN", false);
         }
 
@@ -239,6 +272,8 @@ export default function useKeyboardControl({
 
     return () => {
       stopCameraRepeat();
+      stopMoveRepeat();
+      stopHornRepeat();
       window.removeEventListener("keydown", handleKeyDown, { capture: true });
       window.removeEventListener("keyup", handleKeyUp, { capture: true });
       document.removeEventListener("visibilitychange", onVisibilityChange);

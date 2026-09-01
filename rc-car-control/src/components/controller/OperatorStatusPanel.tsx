@@ -17,6 +17,7 @@ import {
   driveStateLabel,
   formatCameraAim,
   pressedKeysLabel,
+  trackPowerFromDrive,
   trackPowerFromCommand,
 } from "@/components/controller/controlPanelDisplay";
 import type { InputMode } from "@/types/control";
@@ -40,6 +41,8 @@ interface OperatorStatusPanelProps {
   cameraPan: number;
   cameraTilt: number;
   lastCommand: string;
+  driveThrottle?: number;
+  driveSteering?: number;
   lastAction: string;
   actionPressed: boolean;
   inputMode: InputMode;
@@ -145,6 +148,8 @@ export default function OperatorStatusPanel({
   cameraPan,
   cameraTilt,
   lastCommand,
+  driveThrottle,
+  driveSteering,
   lastAction,
   actionPressed,
   inputMode,
@@ -157,7 +162,10 @@ export default function OperatorStatusPanel({
   const cloudTone: StatusTone = cloudConnected ? "good" : cloudConnecting ? "waiting" : "bad";
   const vehicleTone: StatusTone = vehicleOnline ? "good" : cloudConnected ? "waiting" : "neutral";
   const cameraTone: StatusTone = cameraOnline ? "good" : cloudConnected ? "waiting" : "neutral";
-  const trackPower = trackPowerFromCommand(lastCommand);
+  const trackPower =
+    typeof driveThrottle === "number" && typeof driveSteering === "number"
+      ? trackPowerFromDrive(driveThrottle, driveSteering)
+      : trackPowerFromCommand(lastCommand);
   const cameraAim = formatCameraAim(cameraPan, cameraTilt);
   const InputIcon = inputMode === "gamepad" ? Gamepad2 : inputMode === "touch" ? Smartphone : Keyboard;
 
@@ -242,7 +250,7 @@ export default function OperatorStatusPanel({
               <p className="text-[10px] font-semibold uppercase text-slate-500">Camera direction</p>
               <p className="mt-1 text-sm font-bold text-slate-950">{cameraAim.compact}</p>
               <p className="mt-0.5 text-[10px] text-slate-500">
-                ค่ากลาง = 0° · Pan servo {cameraAim.panServoDeg}° · Tilt servo {cameraAim.tiltServoDeg}°
+                Pan ตรง = 0° · Tilt เริ่ม = 0° · Servo {cameraAim.panServoDeg}°/{cameraAim.tiltServoDeg}°
               </p>
             </div>
           </div>

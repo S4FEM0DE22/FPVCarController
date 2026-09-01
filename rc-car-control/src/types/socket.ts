@@ -45,7 +45,10 @@ export interface TelemetryMessage {
   vehicleId: string;
   online: boolean;
   battery: number;
+  batteryVoltage?: number;
   wifi: number;
+  wifiSsid?: string;
+  wifiGateway?: string;
   latency: number;
   cameraOn: boolean;
   driveState: VehicleDriveState;
@@ -64,6 +67,21 @@ export interface CameraFrameMessage {
   data: string;
   width?: number | null;
   height?: number | null;
+  timestamp: number;
+}
+
+export interface CameraFrameMetaMessage {
+  type: "camera_frame_meta";
+  vehicleId: string;
+  frameId: number;
+  timestamp: number;
+}
+
+export interface CameraFrameRenderedMessage {
+  type: "camera_frame_rendered";
+  vehicleId: string;
+  frameId: number;
+  displayed: boolean;
   timestamp: number;
 }
 
@@ -88,6 +106,8 @@ export interface CameraStreamStatusMessage {
   jpegQuality: number;
   rssi: number;
   timeouts: number;
+  wifiSsid?: string;
+  wifiGateway?: string;
   timestamp: number;
 }
 
@@ -114,6 +134,17 @@ export interface WifiScanResultMessage {
   error?: string;
   timestamp: number;
   requestId?: string;
+}
+
+export interface WifiUpdateStatusMessage {
+  type: "wifi_update_status";
+  vehicleId: string;
+  commandId: string;
+  state: "preparing" | "switching" | "verifying" | "committing" | "success" | "failed";
+  ok: boolean;
+  ssid: string;
+  message?: string;
+  timestamp: number;
 }
 
 export interface StatusMessage {
@@ -144,15 +175,18 @@ export type OutgoingMessage =
   | ControlMessage
   | ActionMessage
   | IdentifyMessage
-  | PingMessage;
+  | PingMessage
+  | CameraFrameRenderedMessage;
 
 export type IncomingMessage =
   | TelemetryMessage
   | CameraFrameMessage
+  | CameraFrameMetaMessage
   | CameraStatusMessage
   | CameraStreamStatusMessage
   | DeviceLogMessage
   | WifiScanResultMessage
+  | WifiUpdateStatusMessage
   | StatusMessage
   | PongMessage
   | AckMessage

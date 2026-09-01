@@ -38,6 +38,9 @@ export default function TouchControlDeck({
   const [pressedAction, setPressedAction] = useState<"horn" | "cameraReset" | null>(null);
   const [deckWidth, setDeckWidth] = useState(0);
   const deckRef = useRef<HTMLElement | null>(null);
+  const hornRepeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const hornPointerActiveRef = useRef(false);
+  const skipHornClickRef = useRef(false);
   const activeAction = pressedAction ?? externalPressedQuickAction;
   const showSticks = inputMode !== "gamepad";
   const availableJoystickWidth = Math.floor((deckWidth - 24 - 12) / 2 - 16);
@@ -48,6 +51,41 @@ export default function TouchControlDeck({
     ? 104
     : 124;
   const actionButtonHeightClass = sideBySide ? "min-h-10" : "min-h-11";
+
+  const stopHornHold = () => {
+    if (hornRepeatTimerRef.current) {
+      clearInterval(hornRepeatTimerRef.current);
+      hornRepeatTimerRef.current = null;
+    }
+    hornPointerActiveRef.current = false;
+    setPressedAction((current) => (current === "horn" ? null : current));
+  };
+
+  const startHornHold = () => {
+    if (hornPointerActiveRef.current) return;
+    hornPointerActiveRef.current = true;
+    skipHornClickRef.current = true;
+    setPressedAction("horn");
+    onAction("HORN");
+    hornRepeatTimerRef.current = setInterval(() => {
+      if (hornPointerActiveRef.current) onAction("HORN");
+    }, 220);
+  };
+
+  const cancelHornHold = () => {
+    stopHornHold();
+    skipHornClickRef.current = false;
+  };
+
+  useEffect(() => {
+    return () => {
+      if (hornRepeatTimerRef.current) {
+        clearInterval(hornRepeatTimerRef.current);
+        hornRepeatTimerRef.current = null;
+      }
+      hornPointerActiveRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     const deck = deckRef.current;
@@ -130,10 +168,10 @@ export default function TouchControlDeck({
               ? "border-sky-300 bg-sky-500 text-white"
               : "border-slate-200 bg-slate-50 text-slate-700"
           }`}
-          title="ตั้งกล้องกลับกึ่งกลาง"
+          title="ตั้งกล้องกลับตำแหน่งเริ่มต้น"
         >
           <RotateCcw size={16} />
-          กลาง
+          เริ่ม
         </button>
         <button
           type="button"
@@ -148,11 +186,19 @@ export default function TouchControlDeck({
         </button>
         <button
           type="button"
-          onClick={() => onAction("HORN")}
-          onPointerDown={() => setPressedAction("horn")}
-          onPointerUp={() => setPressedAction(null)}
-          onPointerCancel={() => setPressedAction(null)}
-          onPointerLeave={() => setPressedAction(null)}
+          onClick={() => {
+            if (skipHornClickRef.current) {
+              skipHornClickRef.current = false;
+              return;
+            }
+            onAction("HORN");
+          }}
+          onPointerDown={startHornHold}
+          onPointerUp={stopHornHold}
+          onPointerCancel={cancelHornHold}
+          onPointerLeave={() => {
+            if (hornPointerActiveRef.current) cancelHornHold();
+          }}
           className={`grid ${actionButtonHeightClass} place-items-center rounded-md border text-[8px] font-bold transition active:scale-95 ${
             activeAction === "horn"
               ? "border-orange-300 bg-orange-500 text-white"

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { clamp } from "@/lib/math";
 import type { ControlCommand } from "@/types/control";
 
@@ -23,6 +23,13 @@ export default function VirtualJoystick({
 }: VirtualJoystickProps) {
   const baseRef = useRef<HTMLDivElement | null>(null);
   const activeRef = useRef(false);
+  const repeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const currentCommandRef = useRef<ControlCommand>("STOP");
+  const currentPayloadRef = useRef<Record<string, unknown>>({
+    throttle: 0,
+    steering: 0,
+  });
+  const onMoveRef = useRef(onMove);
 
   const [stick, setStick] = useState<Point>({ x: 0, y: 0 });
 
@@ -30,10 +37,28 @@ export default function VirtualJoystick({
   const knobSize = useMemo(() => size * 0.34, [size]);
   const maxDistance = useMemo(() => radius - knobSize / 2 - 8, [radius, knobSize]);
 
+  useEffect(() => {
+    onMoveRef.current = onMove;
+  }, [onMove]);
+
+  useEffect(() => {
+    return () => {
+      if (repeatTimerRef.current) {
+        clearInterval(repeatTimerRef.current);
+      }
+    };
+  }, []);
+
   const resetStick = () => {
     activeRef.current = false;
+    if (repeatTimerRef.current) {
+      clearInterval(repeatTimerRef.current);
+      repeatTimerRef.current = null;
+    }
+    currentCommandRef.current = "STOP";
+    currentPayloadRef.current = { throttle: 0, steering: 0 };
     setStick({ x: 0, y: 0 });
-    onMove("STOP", { throttle: 0, steering: 0 });
+    onMoveRef.current("STOP", { throttle: 0, steering: 0 });
   };
 
   const resolveCommand = (x: number, y: number): ControlCommand => {
@@ -85,9 +110,19 @@ export default function VirtualJoystick({
 
     const steering = round3(clamp(dx / maxDistance, -1, 1));
     const throttle = round3(clamp(-dy / maxDistance, -1, 1));
+    const command = resolveCommand(dx, dy);
 
     setStick({ x: dx, y: dy });
-    onMove(resolveCommand(dx, dy), { throttle, steering });
+    currentCommandRef.current = command;
+    currentPayloadRef.current = { throttle, steering };
+    onMoveRef.current(command, currentPayloadRef.current);
+
+    if (!repeatTimerRef.current) {
+      repeatTimerRef.current = setInterval(() => {
+        if (!activeRef.current || currentCommandRef.current === "STOP") return;
+        onMoveRef.current(currentCommandRef.current, currentPayloadRef.current);
+      }, 250);
+    }
   };
 
   const joystickCircle = (

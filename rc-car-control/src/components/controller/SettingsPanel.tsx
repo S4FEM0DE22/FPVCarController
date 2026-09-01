@@ -9,7 +9,6 @@ import {
   Check,
   LockKeyhole,
   Power,
-  Radio,
   RefreshCw,
   SlidersHorizontal,
   Wifi,
@@ -23,7 +22,11 @@ import {
 } from "@/lib/softCodeProfile";
 import { NETWORK_CONFIG } from "@/constants/network";
 import type { VehicleSoftCodeProfile } from "@/types/control";
-import type { CameraStreamProfile, WifiNetwork } from "@/types/socket";
+import type {
+  CameraStreamProfile,
+  WifiNetwork,
+  WifiUpdateStatusMessage,
+} from "@/types/socket";
 import type { WifiScanState } from "@/hooks/useVehicleController";
 import type {
   ControllerAlertRules,
@@ -37,11 +40,16 @@ interface SettingsPanelProps {
   onChangeWifi: (ssid: string, password: string) => Promise<void> | void;
   vehicleOnline: boolean;
   cameraOnline: boolean;
+  vehicleWifiSsid?: string;
+  vehicleWifiGateway?: string;
+  cameraWifiSsid?: string;
+  cameraWifiGateway?: string;
   cameraStreamProfile: CameraStreamProfile;
   onChangeCameraStreamProfile: (profile: CameraStreamProfile) => Promise<void> | void;
   wifiNetworks: WifiNetwork[];
   wifiScanState: WifiScanState;
   wifiScanError: string;
+  wifiUpdateStatus: WifiUpdateStatusMessage | null;
   onScanWifi: () => void;
   onReconnectVehicle: () => Promise<void> | void;
   onRebootVehicle: () => Promise<void> | void;
@@ -73,11 +81,16 @@ export default function SettingsPanel({
   onChangeWifi,
   vehicleOnline,
   cameraOnline,
+  vehicleWifiSsid,
+  vehicleWifiGateway,
+  cameraWifiSsid,
+  cameraWifiGateway,
   cameraStreamProfile,
   onChangeCameraStreamProfile,
   wifiNetworks,
   wifiScanState,
   wifiScanError,
+  wifiUpdateStatus,
   onScanWifi,
   onReconnectVehicle,
   onRebootVehicle,
@@ -114,6 +127,13 @@ export default function SettingsPanel({
   const cloudUrl = NETWORK_CONFIG.cloudUrl || "Local / custom WebSocket";
   const wsUrl = NETWORK_CONFIG.wsUrl;
   const selectedNetwork = wifiNetworks.find((network) => network.ssid === ssid);
+  const hasBothNetworkReports = Boolean(vehicleWifiSsid && cameraWifiSsid);
+  const sameWifi =
+    hasBothNetworkReports &&
+    vehicleWifiSsid === cameraWifiSsid &&
+    (!vehicleWifiGateway ||
+      !cameraWifiGateway ||
+      vehicleWifiGateway === cameraWifiGateway);
   const networkReady =
     vehicleOnline &&
     Boolean(selectedNetwork) &&
@@ -157,10 +177,13 @@ export default function SettingsPanel({
 
     try {
       await onChangeWifi(nextSsid, password);
-      setMessage("ส่งค่า WiFi ไปที่ ESP32 และ ESP32-CAM แล้ว");
+      setMessage(
+        "รถและกล้องเชื่อมเครือข่ายใหม่สำเร็จ และบันทึกค่าเรียบร้อยแล้ว"
+      );
       setPassword("");
-    } catch {
-      setMessage("ส่งค่า WiFi ไปที่รถแล้ว แต่ ESP32-CAM อาจอัปเดตไม่สำเร็จ");
+    } catch (error) {
+      const detail = error instanceof Error ? ` (${error.message})` : "";
+      setMessage(`เปลี่ยน Wi-Fi ไม่สำเร็จ ระบบกำลังกลับไปใช้เครือข่ายเดิม${detail}`);
     } finally {
       setSubmitting(false);
     }
@@ -176,8 +199,8 @@ export default function SettingsPanel({
     try {
       await action();
       setMessage(successMessage);
-    } catch {
-      setMessage("ส่งคำสั่งไม่สำเร็จ");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "ส่งคำสั่งไม่สำเร็จ");
     } finally {
       setSubmitting(false);
     }
@@ -205,13 +228,23 @@ export default function SettingsPanel({
     setMessage("");
     setProfileError("");
 
+    if (!vehicleOnline) {
+      setSubmitting(false);
+      setProfileError("ต้องรอให้ ESP32 ออนไลน์ก่อนส่งค่าพฤติกรรมรถ");
+      return;
+    }
+
     try {
       const normalized = normalizeSoftCodeProfile(profileDraft);
       setProfileDraft(normalized);
       await onApplySoftCodeProfile(normalized);
-      setMessage(`Applied soft code profile: ${normalized.name}`);
-    } catch {
-      setProfileError("ค่าพฤติกรรมไม่ถูกต้อง หรืออยู่นอกช่วงที่รองรับ");
+      setMessage(`Cloud รับโปรไฟล์ ${normalized.name} และส่งต่อไปยัง ESP32 แล้ว`);
+    } catch (error) {
+      setProfileError(
+        error instanceof Error
+          ? error.message
+          : "ค่าพฤติกรรมไม่ถูกต้อง หรืออยู่นอกช่วงที่รองรับ"
+      );
     } finally {
       setSubmitting(false);
     }
@@ -309,6 +342,49 @@ export default function SettingsPanel({
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
           {activeTab === "network" ? (
             <>
+              <div
+                className={`rounded-lg border p-3 ${
+                  !vehicleOnline || !cameraOnline
+                    ? "border-amber-200 bg-amber-50"
+                    : !hasBothNetworkReports
+                    ? "border-sky-200 bg-sky-50"
+                    : sameWifi
+                    ? "border-emerald-200 bg-emerald-50"
+                    : "border-rose-200 bg-rose-50"
+                }`}
+              >
+                <div className="flex items-start gap-2.5">
+                  {vehicleOnline && cameraOnline && sameWifi ? (
+                    <Check size={18} className="mt-0.5 shrink-0 text-emerald-700" />
+                  ) : (
+                    <WifiOff size={18} className="mt-0.5 shrink-0 text-amber-700" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      {!vehicleOnline
+                        ? "ESP32 ยังไม่ออนไลน์"
+                        : !cameraOnline
+                        ? "ESP32-CAM ยังไม่ออนไลน์"
+                        : !hasBothNetworkReports
+                        ? "กำลังตรวจสอบเครือข่ายของสองบอร์ด"
+                        : sameWifi
+                        ? "รถและกล้องอยู่บน Wi-Fi เดียวกัน"
+                        : "รถและกล้องอยู่คนละเครือข่าย"}
+                    </h3>
+                    <p className="mt-1 text-xs leading-5 text-slate-600">
+                      ESP32: {vehicleOnline ? vehicleWifiSsid || "กำลังอ่านค่า" : "ออฟไลน์"}
+                      <br />
+                      ESP32-CAM: {cameraOnline ? cameraWifiSsid || "กำลังอ่านค่า" : "ออฟไลน์"}
+                    </p>
+                    {hasBothNetworkReports && !sameWifi && (
+                      <p className="mt-2 text-xs font-medium text-rose-800">
+                        เปิด FPV-Car-Setup เพื่อตั้งค่าให้ทั้งสองบอร์ดใหม่พร้อมกัน
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
               <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sky-950">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
@@ -343,10 +419,13 @@ export default function SettingsPanel({
               >
                 <div className="mb-1 flex items-center gap-2">
                   <Wifi size={17} className="text-emerald-700" />
-                  <h3 className="text-sm font-semibold text-neutral-800">เปลี่ยน Wi-Fi ของรถ</h3>
+                  <h3 className="text-sm font-semibold text-neutral-800">เปลี่ยน Wi-Fi ของรถและกล้อง</h3>
+                  <span className="ml-auto rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-800">
+                    ส่งไปสองบอร์ด
+                  </span>
                 </div>
                 <p className="mb-3 text-xs leading-5 text-slate-500">
-                  ESP32 จะสแกนเครือข่ายที่อยู่ใกล้รถ เลือกชื่อจากรายการแล้วใส่รหัสผ่านเพียงครั้งเดียว
+                  Cloud ส่งค่าให้ ESP32 หลักเพียงครั้งเดียว จากนั้นรถส่งต่อให้กล้องผ่านสาย UART และบันทึกเมื่อทั้งคู่กลับมาออนไลน์สำเร็จ
                 </p>
 
                 <div className="space-y-3">
@@ -494,7 +573,7 @@ export default function SettingsPanel({
                   ) : null}
 
                   <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-950">
-                    รถจะขาดการเชื่อมต่อชั่วคราว หากไม่กลับมาออนไลน์ ให้เข้า FPV-Car-Setup เพื่อตั้งค่าใหม่
+                    เปิด ESP32-CAM ไว้ใกล้รถ และตั้ง Hotspot ให้รับได้อย่างน้อย 2 อุปกรณ์
                   </div>
 
                   <button
@@ -507,9 +586,32 @@ export default function SettingsPanel({
                       : !vehicleOnline
                       ? "รอ ESP32 ออนไลน์"
                       : selectedNetwork
-                      ? `ใช้ ${selectedNetwork.ssid} กับรถ`
+                      ? `ใช้ ${selectedNetwork.ssid} กับรถและกล้อง`
                       : "เลือก Wi-Fi ก่อน"}
                   </button>
+
+                  {submitting && wifiUpdateStatus && (
+                    <div className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 text-xs leading-5 text-sky-950">
+                      <RefreshCw size={15} className="mt-0.5 shrink-0 animate-spin text-sky-600" />
+                      <div>
+                        <p className="font-semibold">กำลังตั้งค่าเครือข่ายทั้งสองบอร์ด</p>
+                        <p>{wifiUpdateStatus.message || wifiUpdateStatus.state}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {message && (
+                    <div
+                      role="status"
+                      className={`rounded-md border px-3 py-2.5 text-xs leading-5 ${
+                        message.includes("ไม่สำเร็จ") || message.includes("กรุณา")
+                          ? "border-rose-200 bg-rose-50 text-rose-900"
+                          : "border-emerald-200 bg-emerald-50 text-emerald-900"
+                      }`}
+                    >
+                      {message}
+                    </div>
+                  )}
                 </div>
               </form>
 
@@ -529,7 +631,7 @@ export default function SettingsPanel({
                         action: onReconnectVehicle,
                       })
                     }
-                    disabled={submitting}
+                    disabled={submitting || !vehicleOnline}
                     className="flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-neutral-700 transition hover:bg-slate-100 disabled:opacity-50"
                   >
                     <RefreshCw size={16} /> เชื่อมต่อเครือข่ายรถใหม่
@@ -538,17 +640,17 @@ export default function SettingsPanel({
                   <button
                     onClick={() =>
                       requestConfirmAction({
-                        title: "Open WiFi Setup Mode?",
+                        title: "รีเซต Wi-Fi ทั้งสองบอร์ด?",
                         description:
-                          "Vehicle may switch to setup mode and disconnect normal remote control until reconfigured.",
-                        successMessage: "สั่งเปิด WiFi setup mode แล้ว",
+                          "ระบบจะล้าง Wi-Fi ของ ESP32 และ ESP32-CAM ผ่าน UART แล้วเปิด FPV-Car-Setup การควบคุมระยะไกลจะหยุดจนกว่าจะตั้งค่าใหม่",
+                        successMessage: "กำลังรีเซต Wi-Fi ทั้งสองบอร์ด",
                         action: onOpenWifiPortal,
                       })
                     }
-                    disabled={submitting}
+                    disabled={submitting || !vehicleOnline}
                     className="flex items-center justify-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-900 transition hover:bg-amber-100 disabled:opacity-50"
                   >
-                    <Radio size={16} /> เปิดโหมด FPV-Car-Setup
+                    <WifiOff size={16} /> รีเซต Wi-Fi ทั้งสองบอร์ด
                   </button>
 
                   <button
@@ -561,7 +663,7 @@ export default function SettingsPanel({
                         action: onRebootVehicle,
                       })
                     }
-                    disabled={submitting}
+                    disabled={submitting || !vehicleOnline}
                     className="flex items-center justify-center gap-2 rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-800 transition hover:bg-rose-100 disabled:opacity-50"
                   >
                     <Power size={16} /> รีสตาร์ตรถ
@@ -570,46 +672,49 @@ export default function SettingsPanel({
               </div>
             </>
           ) : activeTab === "control" ? (
-            <div className="space-y-4 rounded-2xl glass-chip p-3 sm:p-4">
+            <div className="space-y-4 rounded-lg glass-chip p-3 sm:p-4">
               <div>
-                <h3 className="text-sm font-semibold text-neutral-800">
-                  Controller Feel
-                </h3>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-neutral-800">ความรู้สึกของชุดควบคุม</h3>
+                  <span className="rounded-md border border-sky-200 bg-sky-50 px-2 py-1 text-[10px] font-semibold text-sky-800">
+                    บันทึกในเบราว์เซอร์นี้
+                  </span>
+                </div>
                 <p className="mt-1 text-xs leading-5 text-slate-500">
-                  These settings affect browser input before commands are sent to the vehicle.
+                  มีผลกับคีย์บอร์ด จอย และจอยเสมือนบนอุปกรณ์เครื่องนี้ก่อนส่งคำสั่งไปที่รถ ไม่ได้เปลี่ยนเฟิร์มแวร์
                 </p>
               </div>
 
               <div>
-                <p className="mb-2 text-xs text-slate-500">Quick Presets</p>
+                <p className="mb-2 text-xs text-slate-500">ชุดค่าพร้อมใช้</p>
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
                     onClick={() => applyControlPreset("beginner")}
                     className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
                   >
-                    Beginner
+                    มือใหม่
                   </button>
                   <button
                     type="button"
                     onClick={() => applyControlPreset("indoor")}
                     className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
                   >
-                    Indoor
+                    ในอาคาร
                   </button>
                   <button
                     type="button"
                     onClick={() => applyControlPreset("sport")}
                     className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
                   >
-                    Sport
+                    ตอบสนองไว
                   </button>
                 </div>
               </div>
 
               <div>
                 <label className="mb-1 block text-xs text-slate-500">
-                  Touch Steering Gain ({tuning.touchSteeringGain.toFixed(2)})
+                  ความไวการเลี้ยว ({tuning.touchSteeringGain.toFixed(2)})
                 </label>
                 <input
                   type="range"
@@ -629,7 +734,7 @@ export default function SettingsPanel({
 
               <div>
                 <label className="mb-1 block text-xs text-slate-500">
-                  Touch Throttle Gain ({tuning.touchThrottleGain.toFixed(2)})
+                  ความไวคันเร่ง ({tuning.touchThrottleGain.toFixed(2)})
                 </label>
                 <input
                   type="range"
@@ -649,7 +754,7 @@ export default function SettingsPanel({
 
               <div>
                 <label className="mb-1 block text-xs text-slate-500">
-                  Touch Deadzone ({tuning.touchDeadzone.toFixed(2)})
+                  ระยะตายของจอย ({tuning.touchDeadzone.toFixed(2)})
                 </label>
                 <input
                   type="range"
@@ -669,7 +774,7 @@ export default function SettingsPanel({
 
               <div>
                 <label className="mb-1 block text-xs text-slate-500">
-                  Camera Action Gain ({tuning.cameraActionGain.toFixed(2)})
+                  ความไวการหันกล้อง ({tuning.cameraActionGain.toFixed(2)})
                 </label>
                 <input
                   type="range"
@@ -693,13 +798,13 @@ export default function SettingsPanel({
                   onClick={onResetTuning}
                   className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
                 >
-                  Reset Defaults
+                  คืนค่าการควบคุม
                 </button>
               </div>
 
               <div className="rounded-xl bg-white/45 p-3">
                 <div className="flex items-center justify-between gap-3">
-                  <h4 className="text-sm font-semibold text-slate-800">Auto Safety Watchdog</h4>
+                  <h4 className="text-sm font-semibold text-slate-800">หยุดรถอัตโนมัติ</h4>
                   <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-600">
                     <input
                       type="checkbox"
@@ -711,15 +816,15 @@ export default function SettingsPanel({
                         })
                       }
                     />
-                    Enabled
+                    เปิดใช้
                   </label>
                 </div>
                 <p className="mt-1 text-xs text-slate-500">
-                  Send STOP automatically when no user input is detected for the timeout duration.
+                  หน้าเว็บจะส่ง STOP เมื่อไม่มีอินพุตตามเวลาที่กำหนด
                 </p>
                 <div className="mt-2">
                   <label className="mb-1 block text-xs text-slate-500">
-                    Timeout ({Math.round(watchdog.timeoutMs / 1000)}s)
+                    เวลาก่อนหยุด ({(watchdog.timeoutMs / 1000).toFixed(1)} วินาที)
                   </label>
                   <input
                     type="range"
@@ -740,7 +845,7 @@ export default function SettingsPanel({
 
               <div className="rounded-xl bg-white/45 p-3">
                 <div className="flex items-center justify-between gap-3">
-                  <h4 className="text-sm font-semibold text-slate-800">Telemetry Alert Rules</h4>
+                  <h4 className="text-sm font-semibold text-slate-800">เกณฑ์แจ้งเตือนสถานะรถ</h4>
                   <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-600">
                     <input
                       type="checkbox"
@@ -752,13 +857,13 @@ export default function SettingsPanel({
                         })
                       }
                     />
-                    Enabled
+                    เปิดใช้
                   </label>
                 </div>
                 <div className="mt-3 space-y-3">
                   <div>
                     <label className="mb-1 block text-xs text-slate-500">
-                      Battery Warning Below ({alertRules.batteryBelow}%)
+                      เตือนแบตเตอรี่ต่ำกว่า ({alertRules.batteryBelow}%)
                     </label>
                     <input
                       type="range"
@@ -777,7 +882,7 @@ export default function SettingsPanel({
                   </div>
                   <div>
                     <label className="mb-1 block text-xs text-slate-500">
-                      Latency Warning Above ({alertRules.latencyAbove} ms)
+                      เตือนความหน่วงสูงกว่า ({alertRules.latencyAbove} ms)
                     </label>
                     <input
                       type="range"
@@ -796,7 +901,7 @@ export default function SettingsPanel({
                   </div>
                   <div>
                     <label className="mb-1 block text-xs text-slate-500">
-                      WiFi Warning Below ({alertRules.wifiBelow} dBm)
+                      เตือนสัญญาณ Wi-Fi ต่ำกว่า ({alertRules.wifiBelow} dBm)
                     </label>
                     <input
                       type="range"
@@ -819,7 +924,7 @@ export default function SettingsPanel({
           ) : (
             <form
               onSubmit={handleSoftCodeSubmit}
-              className="rounded-2xl glass-chip p-3 sm:p-4"
+              className="rounded-lg glass-chip p-3 sm:p-4"
             >
               <div className="mb-4 border-b border-slate-200 pb-4">
                 <div className="flex items-start justify-between gap-3">
@@ -845,8 +950,10 @@ export default function SettingsPanel({
                       type="button"
                       disabled={!cameraOnline}
                       onClick={async () => {
-                        await onChangeCameraStreamProfile(profile);
-                        setMessage(`ส่งโหมดภาพ ${label} ไปยัง ESP32-CAM แล้ว`);
+                        await runAction(
+                          () => onChangeCameraStreamProfile(profile),
+                          `Cloud รับคำสั่งโหมดภาพ ${label} และส่งต่อไปยัง ESP32-CAM แล้ว`
+                        );
                       }}
                       className={`rounded-md px-2 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-45 ${
                         cameraStreamProfile === profile
@@ -865,10 +972,10 @@ export default function SettingsPanel({
 
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-sm font-semibold text-neutral-800">
-                  Soft Code Studio
+                  พฤติกรรมการขับของรถ
                 </h3>
-                <span className="rounded-full border border-white/50 bg-white/65 px-2.5 py-1 text-[11px] font-medium text-slate-600">
-                  Behavior Profile
+                <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-800">
+                  ส่งไป ESP32
                 </span>
               </div>
 
@@ -913,7 +1020,7 @@ export default function SettingsPanel({
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <div>
                   <label className="mb-1 block text-xs font-medium text-slate-500">
-                    Profile Name
+                    ชื่อโปรไฟล์
                   </label>
                   <input
                     value={profileDraft.name}
@@ -926,7 +1033,7 @@ export default function SettingsPanel({
 
                 <div>
                   <label className="mb-1 block text-xs font-medium text-slate-500">
-                    Note
+                    หมายเหตุ
                   </label>
                   <input
                     value={profileDraft.note}
@@ -939,7 +1046,7 @@ export default function SettingsPanel({
 
                 <div>
                   <label className="mb-1 block text-xs font-medium text-slate-500">
-                    Drive Scale {profileDraft.driveScale.toFixed(2)}
+                    กำลังขับ {profileDraft.driveScale.toFixed(2)} เท่า
                   </label>
                   <input
                     type="range"
@@ -956,7 +1063,7 @@ export default function SettingsPanel({
 
                 <div>
                   <label className="mb-1 block text-xs font-medium text-slate-500">
-                    Steering Scale {profileDraft.steeringScale.toFixed(2)}
+                    กำลังเลี้ยว {profileDraft.steeringScale.toFixed(2)} เท่า
                   </label>
                   <input
                     type="range"
@@ -973,7 +1080,7 @@ export default function SettingsPanel({
 
                 <div>
                   <label className="mb-1 block text-xs font-medium text-slate-500">
-                    Camera Step {profileDraft.cameraStepDeg.toFixed(0)} deg
+                    ระยะขยับกล้อง {profileDraft.cameraStepDeg.toFixed(0)} องศา
                   </label>
                   <input
                     type="range"
@@ -990,7 +1097,7 @@ export default function SettingsPanel({
 
                 <div>
                   <label className="mb-1 block text-xs font-medium text-slate-500">
-                    Throttle Exponent {profileDraft.throttleExponent.toFixed(2)}
+                    รูปแบบการไล่คันเร่ง {profileDraft.throttleExponent.toFixed(2)}
                   </label>
                   <input
                     type="range"
@@ -1026,23 +1133,25 @@ export default function SettingsPanel({
               <div className="mt-3 grid gap-2 sm:grid-cols-2">
                 <button
                   type="submit"
-                  disabled={submitting}
+                  disabled={submitting || !vehicleOnline}
                   className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {submitting ? "Applying..." : "Apply to Vehicle"}
+                  {submitting ? "กำลังรอการตอบรับ..." : vehicleOnline ? "ส่งค่าไปที่รถ" : "รอ ESP32 ออนไลน์"}
                 </button>
                 <button
                   type="button"
-                  disabled={submitting}
+                  disabled={submitting || !vehicleOnline}
                   onClick={async () => {
                     setProfileDraft(DEFAULT_SOFT_CODE_PROFILE);
                     setProfileError("");
-                    await onResetSoftCodeProfile();
-                    setMessage("Reset soft code profile to defaults");
+                    await runAction(
+                      onResetSoftCodeProfile,
+                      "Cloud รับคำสั่งคืนค่าพฤติกรรมรถแล้ว"
+                    );
                   }}
                   className="rounded-2xl border border-amber-200/70 bg-amber-400/15 px-4 py-3 text-sm font-semibold text-amber-900 transition hover:bg-amber-400/25 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  Reset to Defaults
+                  คืนค่าโปรไฟล์รถ
                 </button>
               </div>
 
@@ -1051,7 +1160,7 @@ export default function SettingsPanel({
           )}
 
           <div className="rounded-2xl glass-chip p-3 text-sm text-neutral-600">
-            {message || "ยังไม่มีการส่งคำสั่ง settings"}
+            {message || "สถานะคำสั่งจะแสดงที่นี่"}
           </div>
         </div>
 

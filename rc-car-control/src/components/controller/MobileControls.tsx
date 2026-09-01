@@ -17,7 +17,6 @@ interface MobileControlsProps {
   cameraOn: boolean;
   lightOn: boolean;
   streamUrl?: string;
-  frameSrc?: string;
   connectionState: string;
   vehicleOnline: boolean;
   battery: number;
@@ -47,7 +46,6 @@ export default function MobileControls({
   cameraOn,
   lightOn,
   streamUrl = "",
-  frameSrc = "",
   connectionState,
   vehicleOnline,
   battery,
@@ -137,7 +135,7 @@ export default function MobileControls({
       onTouchStart={wakeControls}
       onTouchMove={wakeControls}
     >
-      <VideoStream streamUrl={streamUrl} frameSrc={frameSrc} cameraOn={cameraOn} />
+      <VideoStream streamUrl={streamUrl} cameraOn={cameraOn} />
 
       <div className={`absolute inset-0 transition-opacity duration-300 ${controlsVisibilityClass}`}>
         <MobileStatusBar
