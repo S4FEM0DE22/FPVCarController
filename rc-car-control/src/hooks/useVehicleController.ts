@@ -10,7 +10,7 @@ import {
 import { getVehicleStateAfterStatus } from "@/lib/vehicleStateMachine";
 import useVehicleSocket from "@/hooks/useVehicleSocket";
 import { VEHICLE_CONFIG } from "@/constants/network";
-import { setCameraFrameSource } from "@/lib/cameraFrameStore";
+import { setCameraFrameSource, setCameraFrameStalled } from "@/lib/cameraFrameStore";
 import type {
   ActionCommand,
   ControlCommand,
@@ -44,6 +44,8 @@ const MAX_DEVICE_LOGS = 120;
 const WIFI_SCAN_TIMEOUT_MS = 20000;
 const CAMERA_CONFIRM_TIMEOUT_MS = 1800;
 const CAMERA_FRESHNESS_TIMEOUT_MS = 12000;
+const CAMERA_FRAME_STALE_MS = 3000;
+const CAMERA_DECODE_TIMEOUT_MS = 1500;
 const CAMERA_POSITION_ACTIONS = new Set<ActionCommand>([
   "CAM_LEFT",
   "CAM_RIGHT",
@@ -127,16 +129,28 @@ export default function useVehicleController() {
   const cameraDecoderUrlRef = useRef("");
   const cameraFrameDisposedRef = useRef(false);
   const cameraLastSeenAtRef = useRef(0);
+  const cameraLastFrameAtRef = useRef(0);
+  const cancelCameraDecodeRef = useRef<(() => void) | null>(null);
 
   const replaceCameraFrame = useCallback((nextSrc: string) => {
     const previousSrc = cameraFrameUrlRef.current;
     cameraFrameUrlRef.current = nextSrc;
+    cameraLastFrameAtRef.current = nextSrc ? Date.now() : 0;
+    if (nextSrc) setCameraFrameStalled(false);
     setCameraFrameSource(nextSrc);
 
     if (previousSrc.startsWith("blob:")) {
       window.setTimeout(() => URL.revokeObjectURL(previousSrc), 1000);
     }
   }, []);
+
+  const clearCameraFrames = useCallback(() => {
+    pendingCameraFrameRef.current?.acknowledge(false);
+    pendingCameraFrameRef.current = null;
+    cancelCameraDecodeRef.current?.();
+    replaceCameraFrame("");
+    setCameraFrameStalled(false);
+  }, [replaceCameraFrame]);
 
   const decodeLatestCameraFrame = useCallback(function decodeLatestFrame() {
     if (cameraFrameDecodingRef.current || cameraFrameDisposedRef.current) return;
@@ -155,11 +169,17 @@ export default function useVehicleController() {
     cameraDecoderRef.current = decoder;
     cameraDecoderUrlRef.current = nextUrl;
 
+    let finished = false;
     const finish = (publish: boolean) => {
+      if (finished) return;
+      finished = true;
+      window.clearTimeout(decodeTimer);
+      cancelCameraDecodeRef.current = null;
       decoder.onload = null;
       decoder.onerror = null;
       cameraDecoderRef.current = null;
       cameraDecoderUrlRef.current = "";
+      if (!publish) decoder.src = "";
 
       if (publish && !cameraFrameDisposedRef.current) {
         replaceCameraFrame(nextUrl);
@@ -176,6 +196,8 @@ export default function useVehicleController() {
 
     decoder.onload = () => finish(true);
     decoder.onerror = () => finish(false);
+    cancelCameraDecodeRef.current = () => finish(false);
+    const decodeTimer = window.setTimeout(() => finish(false), CAMERA_DECODE_TIMEOUT_MS);
     decoder.src = nextUrl;
   }, [replaceCameraFrame]);
 
@@ -201,6 +223,7 @@ export default function useVehicleController() {
 
     return () => {
       cameraFrameDisposedRef.current = true;
+      clearCameraFrames();
       pendingCameraFrameRef.current = null;
       setCameraFrameSource("");
       const decoder = cameraDecoderRef.current;
@@ -216,7 +239,7 @@ export default function useVehicleController() {
         URL.revokeObjectURL(cameraFrameUrlRef.current);
       }
     };
-  }, []);
+  }, [clearCameraFrames]);
 
   const handleSocketMessage = useCallback((message: IncomingMessage) => {
     if (message.type === "telemetry") {
@@ -294,7 +317,7 @@ export default function useVehicleController() {
       cameraLastSeenAtRef.current = message.online ? Date.now() : 0;
       setCameraOnline(message.online);
       if (!message.online) {
-        replaceCameraFrame("");
+        clearCameraFrames();
         setCameraStreamStatus(null);
       }
     }
@@ -365,7 +388,7 @@ export default function useVehicleController() {
       setStatusState("error");
       setStatusMessage(message.message);
     }
-  }, [replaceCameraFrame]);
+  }, [replaceCameraFrame, clearCameraFrames]);
 
   const {
     connectionState,
@@ -387,11 +410,16 @@ export default function useVehicleController() {
       cameraLastSeenAtRef.current = 0;
       setCameraOnline(false);
       setCameraStreamStatus(null);
-      replaceCameraFrame("");
+      clearCameraFrames();
       return;
     }
 
     const timer = window.setInterval(() => {
+      const lastFrameAt = cameraLastFrameAtRef.current;
+      if (lastFrameAt > 0 && Date.now() - lastFrameAt > CAMERA_FRAME_STALE_MS) {
+        replaceCameraFrame("");
+        setCameraFrameStalled(true);
+      }
       const lastSeenAt = cameraLastSeenAtRef.current;
       if (
         lastSeenAt > 0 &&
@@ -400,12 +428,12 @@ export default function useVehicleController() {
         cameraLastSeenAtRef.current = 0;
         setCameraOnline(false);
         setCameraStreamStatus(null);
-        replaceCameraFrame("");
+        clearCameraFrames();
       }
-    }, 2000);
+    }, 500);
 
     return () => window.clearInterval(timer);
-  }, [connectionState, replaceCameraFrame]);
+  }, [connectionState, replaceCameraFrame, clearCameraFrames]);
 
   const handleMove = useCallback(
     (

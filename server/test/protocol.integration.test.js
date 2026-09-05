@@ -124,7 +124,8 @@ function waitForMessage(ws, predicate, timeoutMs = MESSAGE_TIMEOUT_MS) {
       reject(new Error("Timed out waiting for websocket message"));
     }, timeoutMs);
 
-    const onMessage = (raw) => {
+    const onMessage = (raw, isBinary) => {
+      if (isBinary) return;
       const data = JSON.parse(raw.toString());
       if (predicate(data)) {
         cleanup();
@@ -423,6 +424,77 @@ test("binary camera frame acknowledgements use a monotonic frame ID", async () =
     controller.close();
   }
 });
+
+for (const cached of [false, true]) {
+  test(`camera recovers a missing viewer ACK${cached ? " for a cached frame" : " without blocking other viewers"}`, async () => {
+    const vehicleId = `test-camera-recovery-${cached}-${Date.now()}`;
+    const url = `ws://127.0.0.1:${serverPort}`;
+    const camera = await connectClient(url);
+    const slow = await connectClient(url);
+    const fast = await connectClient(url);
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x01, 0xff, 0xd9]);
+    const identify = async (ws, clientType) => {
+      const ack = waitForMessage(ws, (msg) => msg.type === "ack");
+      sendJson(ws, { type: "identify", clientType, vehicleId });
+      await ack;
+    };
+    const sendFrame = async (id) => {
+      const ack = waitForMessage(camera, (msg) => msg.type === "camera_frame_ack" && msg.frameId === id);
+      camera.send(jpeg, { binary: true });
+      return ack;
+    };
+    const rendered = (ws, frameId) => sendJson(ws, { type: "camera_frame_rendered", frameId, displayed: true });
+    try {
+      await identify(camera, "esp-cam");
+      const first = waitForMessage(slow, (msg) => msg.type === "camera_frame_meta" && msg.frameId === 1);
+      if (cached) {
+        assert.equal((await sendFrame(1)).reason, "no_ready_controller");
+        await identify(slow, "web-controller");
+      } else {
+        await identify(slow, "web-controller");
+        await sendFrame(1);
+      }
+      await first;
+      const fastFirst = waitForMessage(fast, (msg) => msg.type === "camera_frame_meta" && msg.frameId === 1);
+      await identify(fast, "web-controller");
+      await fastFirst;
+      rendered(fast, 1);
+      await delay(100);
+      const fastSecond = waitForMessage(fast, (msg) => msg.type === "camera_frame_meta" && msg.frameId === 2);
+      assert.equal((await sendFrame(2)).accepted, true);
+      await fastSecond;
+      rendered(fast, 2);
+      await delay(950);
+      const recovered = waitForMessage(slow, (msg) => msg.type === "camera_frame_meta" && msg.frameId === 3);
+      const fastThird = waitForMessage(fast, (msg) => msg.type === "camera_frame_meta" && msg.frameId === 3);
+      assert.equal((await sendFrame(3)).accepted, true);
+      await recovered;
+      await fastThird;
+      rendered(fast, 3);
+      rendered(slow, 1);
+      let staleAckUnlocked = false;
+      slow.on("message", (raw, binary) => {
+        if (!binary && JSON.parse(raw.toString()).frameId === 4) staleAckUnlocked = true;
+      });
+      await delay(100);
+      const fastFourth = waitForMessage(fast, (msg) => msg.type === "camera_frame_meta" && msg.frameId === 4);
+      await sendFrame(4);
+      await fastFourth;
+      await delay(30);
+      assert.equal(staleAckUnlocked, false, "late ACK must not release a newer frame");
+      rendered(slow, 3);
+      rendered(fast, 4);
+      await delay(100);
+      const next = waitForMessage(slow, (msg) => msg.type === "camera_frame_meta" && msg.frameId === 5);
+      await sendFrame(5);
+      await next;
+    } finally {
+      camera.close();
+      slow.close();
+      fast.close();
+    }
+  });
+}
 
 test("relay accepts the previous explicit camera frame header during rollout", async () => {
   const vehicleId = `test-camera-legacy-frame-id-${Date.now()}`;

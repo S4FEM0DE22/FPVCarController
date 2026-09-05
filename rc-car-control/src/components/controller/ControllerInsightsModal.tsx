@@ -310,11 +310,11 @@ export default function ControllerInsightsModal({
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
                   <div className="rounded-lg bg-white/55 p-2">
-                    <p className="text-slate-400">FPS</p>
+                    <p className="text-slate-400">กล้องส่ง (FPS)</p>
                     <p className="mt-1 font-semibold text-slate-900">{cameraStreamStatus?.fps.toFixed(1) ?? "-"}</p>
                   </div>
                   <div className="rounded-lg bg-white/55 p-2">
-                    <p className="text-slate-400">Frame RTT</p>
+                    <p className="text-slate-400">ตอบรับจาก Relay</p>
                     <p className="mt-1 font-semibold text-slate-900">{cameraStreamStatus ? `${cameraStreamStatus.ackMs} ms` : "-"}</p>
                   </div>
                   <div className="rounded-lg bg-white/55 p-2">

@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 
 import VideoStream from "@/components/controller/VideoStream";
-import { useCameraFrameAvailable } from "@/lib/cameraFrameStore";
+import { useCameraFrameAvailable, useCameraFrameStalled } from "@/lib/cameraFrameStore";
 import {
   driveStateLabel,
   formatCameraAim,
@@ -57,7 +57,7 @@ interface CameraPanelProps {
   }>;
 }
 
-type StreamStatus = "camera-off" | "no-url" | "invalid-url" | "connecting" | "live" | "error";
+type StreamStatus = "camera-off" | "stalled" | "invalid-url" | "connecting" | "live" | "error";
 
 function streamStatusMeta(status: StreamStatus) {
   switch (status) {
@@ -71,6 +71,8 @@ function streamStatusMeta(status: StreamStatus) {
       return { label: "กำลังต่อภาพ", detail: "กำลังรอภาพจาก ESP32-CAM", tone: "border-amber-300/60 bg-amber-500/85 text-slate-950" };
     case "error":
       return { label: "ภาพขาด", detail: "เปิดกล้องอยู่ แต่โหลดภาพไม่สำเร็จ", tone: "border-rose-300/60 bg-rose-500/85 text-white" };
+    case "stalled":
+      return { label: "ภาพหยุดอัปเดต", detail: "กำลังรอภาพใหม่...", tone: "border-amber-300/60 bg-amber-500/85 text-slate-950" };
     default:
       return { label: "ยังไม่มี URL", detail: "ตั้งค่า URL ของ ESP32-CAM ก่อน", tone: "border-slate-500/50 bg-slate-950/65 text-white" };
   }
@@ -105,19 +107,22 @@ export default function CameraPanel({
   controlGuideItems = [],
 }: CameraPanelProps) {
   const frameAvailable = useCameraFrameAvailable();
+  const frameStalled = useCameraFrameStalled();
   const [statusByUrl, setStatusByUrl] = useState<Record<string, StreamStatus>>({});
   const [showGuide, setShowGuide] = useState(false);
   const [pressedQuickAction, setPressedQuickAction] = useState<"horn" | "cameraReset" | null>(null);
   const activeQuickAction = pressedQuickAction ?? externalPressedQuickAction;
   const isHttpStreamUrl = /^https?:\/\//i.test(streamUrl);
-  const effectiveStreamUrl = cameraEnabled && isHttpStreamUrl ? streamUrl : "";
+  const effectiveStreamUrl = cameraEnabled && isHttpStreamUrl && !frameStalled ? streamUrl : "";
   const effectiveFrameAvailable = cameraEnabled && frameAvailable;
   const streamStatus: StreamStatus = !cameraEnabled
     ? "camera-off"
     : effectiveFrameAvailable
     ? "live"
+    : frameStalled
+    ? "stalled"
     : !streamUrl
-    ? "no-url"
+    ? "connecting"
     : !isHttpStreamUrl
     ? "invalid-url"
     : statusByUrl[streamUrl] ?? "connecting";
