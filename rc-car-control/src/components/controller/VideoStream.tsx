@@ -8,6 +8,7 @@ interface VideoStreamProps {
   className?: string;
   onStreamLoad?: () => void;
   onStreamError?: () => void;
+  showStaleIndicator?: boolean;
 }
 
 export default function VideoStream({
@@ -16,6 +17,7 @@ export default function VideoStream({
   className,
   onStreamLoad,
   onStreamError,
+  showStaleIndicator = true,
 }: VideoStreamProps) {
   const frameSrc = useCameraFrameSource();
   const frameStalled = useCameraFrameStalled();
@@ -26,17 +28,27 @@ export default function VideoStream({
 
   if (effectiveFrameSrc) {
     return (
-      // JPEG frames are decoded before their Blob URL is published.
-      // eslint-disable-next-line @next/next/no-img-element
-      <img
-        src={effectiveFrameSrc}
-        alt="ESP32-CAM cloud frame"
-        className={videoClassName}
-        decoding="async"
-        draggable={false}
-        onLoad={onStreamLoad}
-        onError={onStreamError}
-      />
+      <>
+        {/* JPEG frames are decoded before their Blob URL is published. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={effectiveFrameSrc}
+          alt="ESP32-CAM cloud frame"
+          aria-label={frameStalled ? "ภาพล่าสุดที่ได้รับ ไม่ใช่ภาพสด" : undefined}
+          className={videoClassName}
+          decoding="async"
+          draggable={false}
+          onLoad={onStreamLoad}
+          onError={onStreamError}
+        />
+        {frameStalled && showStaleIndicator && (
+          <div role="status" className="pointer-events-none absolute inset-x-0 bottom-36 z-10 flex justify-center px-16">
+            <span className="rounded border border-amber-300/60 bg-black/85 px-3 py-1 text-center text-xs font-semibold text-amber-200">
+              ภาพหยุดอัปเดต แสดงภาพล่าสุด
+            </span>
+          </div>
+        )}
+      </>
     );
   }
 

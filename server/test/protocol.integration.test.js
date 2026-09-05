@@ -214,6 +214,45 @@ test("identify flow registers controller and returns initial status", async () =
   }
 });
 
+test("device logs from both boards use receipt time and replay oldest first", async () => {
+  const vehicleId = `test-device-logs-${Date.now()}`;
+  const url = `ws://127.0.0.1:${serverPort}`;
+  const esp = await connectClient(url);
+  const cam = await connectClient(url);
+  const controller = await connectClient(url);
+  let reconnect;
+  try {
+    for (const [ws, clientType] of [[esp, "esp"], [cam, "esp-cam"], [controller, "web-controller"]]) {
+      const ack = waitForMessage(ws, msg => msg.type === "ack");
+      sendJson(ws, { type: "identify", clientType, vehicleId });
+      await ack;
+    }
+    const started = Date.now();
+    for (const [ws, source] of [[esp, "esp32"], [cam, "esp32-cam"]]) {
+      const received = waitForMessage(controller, msg => msg.type === "device_log");
+      sendJson(ws, { type: "device_log", source, level: "info", message: source, timestamp: 1234 });
+      const log = await received;
+      assert.equal(log.source, source);
+      assert.ok(log.timestamp >= started && log.timestamp <= Date.now());
+    }
+    reconnect = await connectClient(url);
+    const replay = [];
+    reconnect.on("message", data => {
+      const msg = JSON.parse(data.toString());
+      if (msg.type === "device_log") replay.push(msg.source);
+    });
+    const last = waitForMessage(reconnect, msg => msg.type === "device_log" && msg.source === "esp32-cam");
+    sendJson(reconnect, { type: "identify", clientType: "web-controller", vehicleId });
+    await last;
+    assert.deepEqual(replay, ["esp32", "esp32-cam"]);
+  } finally {
+    esp.close();
+    cam.close();
+    controller.close();
+    reconnect?.close();
+  }
+});
+
 test("control forwarding sends command to esp peer", async () => {
   const vehicleId = `test-control-${Date.now()}`;
   const url = `ws://127.0.0.1:${serverPort}`;

@@ -919,7 +919,7 @@ wss.on("connection", (ws, request) => {
           safeSend(ws, entry.lastCameraStreamStatus);
         }
 
-        for (const deviceLog of entry.lastDeviceLogs) {
+        for (const deviceLog of [...entry.lastDeviceLogs].reverse()) {
           safeSend(ws, deviceLog);
         }
 
@@ -1363,7 +1363,8 @@ wss.on("connection", (ws, request) => {
         source,
         level,
         message,
-        timestamp: data.timestamp || Date.now(),
+        // Firmware timestamps are uptime (millis), not Unix wall-clock time.
+        timestamp: Date.now(),
       };
 
       entry.lastDeviceLogs = [deviceLog, ...entry.lastDeviceLogs].slice(0, 80);
