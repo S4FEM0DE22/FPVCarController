@@ -129,7 +129,6 @@ unsigned long lastCloudAdaptiveAt = 0;
 int appliedCameraFrameSize = -1;
 int appliedCameraJpegQuality = -1;
 unsigned long lastCameraSensorReconfigureAt = 0;
-bool localStreamActive = false;
 String wifiTransactionCommandId = "";
 String wifiCandidateSsid = "";
 String wifiCandidatePass = "";
@@ -152,6 +151,7 @@ String deviceName();
 String streamUrl();
 String controlUrlWithCamera();
 void sendCloudFrame();
+void serviceCameraRuntime();
 void sendDeviceLog(const char *level, const String &message);
 void sendCameraStreamStatus(float fps = 0.0f);
 void tuneCloudJpegQuality();
@@ -362,7 +362,7 @@ void applyCloudStreamProfile(const char *profile, bool persist) {
   cloudMotionMode = false;
   cloudMotionUntil = 0;
 
-  if (cameraSensor && !localStreamActive) {
+  if (cameraSensor) {
     applyCameraSettingsIfChanged(
       cloudIdleFrameSize(),
       cloudJpegQuality,
@@ -552,16 +552,21 @@ void handleStream() {
   response += "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n";
   client.print(response);
 
-  localStreamActive = true;
-  const framesize_t localFrameSize = cameraHasPsram
-    ? FRAMESIZE_VGA
-    : FRAMESIZE_QVGA;
-  const uint8_t localJpegQuality = cameraHasPsram ? 13 : 16;
-  applyCameraSettingsIfChanged(localFrameSize, localJpegQuality, true);
+  // Local and cloud viewers share the active sensor profile.
   uint32_t localFrames = 0;
   unsigned long localStatsAt = millis();
+  unsigned long localFrameAt = 0;
 
   while (client.connected()) {
+    serviceCameraRuntime();
+    if (cameraWifiSwitching() || uartProvisionReceived || WiFi.status() != WL_CONNECTED) break;
+    if (!cameraReady) break;
+    const unsigned long captureAt = millis();
+    if (captureAt - localFrameAt < cloudFrameIntervalMs) {
+      delay(1);
+      continue;
+    }
+    localFrameAt = captureAt;
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
       delay(1);
@@ -591,23 +596,20 @@ void handleStream() {
         (localFrames * 1000.0f) / (now - localStatsAt);
       Serial.printf(
         "Camera local | resolution=%s FPS=%.1f Q=%u RSSI=%d dBm\n",
-        cameraFrameSizeName(localFrameSize),
+        cameraFrameSizeName(cloudMotionMode ? cloudMotionFrameSize() : cloudIdleFrameSize()),
         localFps,
-        localJpegQuality,
+        cloudJpegQuality,
         WiFi.RSSI()
       );
       localFrames = 0;
       localStatsAt = now;
     }
 
-    processVehicleUart();
-    sendVehicleUartStatus();
-    if (webSocketStarted) webSocket.loop();
     yield();
     delay(1);
   }
 
-  localStreamActive = false;
+  client.stop();
   const framesize_t cloudFrameSize = cloudMotionMode
     ? cloudMotionFrameSize()
     : cloudIdleFrameSize();
@@ -1237,7 +1239,7 @@ void setCloudMotionMode(bool active) {
   if (cloudJpegQuality < modeQualityMin) {
     cloudJpegQuality = modeQualityMin;
   }
-  if (cameraSensor && !localStreamActive) {
+  if (cameraSensor) {
     applyCameraSettingsIfChanged(nextFrameSize, cloudJpegQuality);
   }
 
@@ -1346,7 +1348,7 @@ void tuneCloudJpegQuality() {
   cloudJpegQuality = nextQuality;
   cloudFrameIntervalMs = nextInterval;
   lastCloudAdaptiveAt = now;
-  if (!localStreamActive) {
+  if (cameraSensor) {
     const framesize_t frameSize = cloudMotionMode
       ? cloudMotionFrameSize()
       : cloudIdleFrameSize();
@@ -1807,11 +1809,10 @@ void setup() {
   Serial.println(cameraReady ? "ESP32-CAM ready" : "ESP32-CAM web server ready, camera failed");
 }
 
-void loop() {
+void serviceCameraRuntime() {
   processVehicleUart();
   sendVehicleUartStatus();
   webSocket.loop();
-  server.handleClient();
 
   unsigned long now = millis();
 
@@ -1991,4 +1992,9 @@ void loop() {
       );
     }
   }
+}
+
+void loop() {
+  serviceCameraRuntime();
+  server.handleClient();
 }

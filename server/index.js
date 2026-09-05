@@ -321,7 +321,11 @@ function safeSendBinary(ws, payload) {
 
 function sendCameraFrameToController(ws, vehicleId, frameId, payload) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  if (ws.meta?.cameraFrameAwaitingAck) return false;
+  if (ws.meta?.cameraFrameAwaitingAck) {
+    if (Date.now() - ws.meta.cameraFrameSentAt < CAMERA_RENDER_ACK_TIMEOUT_MS) return false;
+    // A suspended viewer must be able to resume without reopening its socket.
+    ws.meta.cameraFrameAwaitingAck = null;
+  }
 
   const metadataSent = safeSend(ws, {
     type: "camera_frame_meta",
@@ -331,7 +335,10 @@ function sendCameraFrameToController(ws, vehicleId, frameId, payload) {
   });
   if (!metadataSent || !safeSendBinary(ws, payload)) return false;
 
-  if (ws.meta) ws.meta.cameraFrameAwaitingAck = frameId;
+  if (ws.meta) {
+    ws.meta.cameraFrameAwaitingAck = frameId;
+    ws.meta.cameraFrameSentAt = Date.now();
+  }
   return true;
 }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCameraFrameSource } from "@/lib/cameraFrameStore";
+import { useCameraFrameSource, useCameraFrameStalled } from "@/lib/cameraFrameStore";
 
 interface VideoStreamProps {
   streamUrl?: string;
@@ -18,6 +18,7 @@ export default function VideoStream({
   onStreamError,
 }: VideoStreamProps) {
   const frameSrc = useCameraFrameSource();
+  const frameStalled = useCameraFrameStalled();
   const isHttpStreamUrl = /^https?:\/\//i.test(streamUrl);
   const effectiveStreamUrl = cameraOn && isHttpStreamUrl ? streamUrl : "";
   const effectiveFrameSrc = cameraOn && frameSrc ? frameSrc : "";
@@ -25,7 +26,7 @@ export default function VideoStream({
 
   if (effectiveFrameSrc) {
     return (
-      // Cloud relay frames are already JPEG data URLs.
+      // JPEG frames are decoded before their Blob URL is published.
       // eslint-disable-next-line @next/next/no-img-element
       <img
         src={effectiveFrameSrc}
@@ -39,7 +40,7 @@ export default function VideoStream({
     );
   }
 
-  if (effectiveStreamUrl) {
+  if (effectiveStreamUrl && !frameStalled) {
     return (
       // MJPEG/ESP32-CAM streams are not compatible with next/image optimization.
       // eslint-disable-next-line @next/next/no-img-element
@@ -56,7 +57,9 @@ export default function VideoStream({
 
   return (
     <div className={`${videoClassName} flex items-center justify-center bg-black/85 text-sm font-semibold text-white/85`}>
-      {cameraOn ? "กำลังเชื่อมต่อภาพจากกล้อง..." : "กล้องปิดอยู่"}
+      {cameraOn
+        ? frameStalled ? "ภาพหยุดอัปเดต กำลังรอภาพใหม่..." : "กำลังเชื่อมต่อภาพจากกล้อง..."
+        : "กล้องปิดอยู่"}
     </div>
   );
 }

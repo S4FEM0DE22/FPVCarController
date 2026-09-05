@@ -4,7 +4,19 @@ This folder contains Arduino sketches for the project hardware:
 
 - `esp32-vehicle-a4950/esp32-vehicle-a4950.ino` is the vehicle sketch for the A4950 dual-channel board.
 - `esp32-vehicle-tb6612/esp32-vehicle-tb6612.ino` is the vehicle sketch for the TB6612FNG board.
-- `esp32-cam/esp32-cam.ino` runs an ESP32-CAM MJPEG stream and redirects users to the web controller with the camera stream URL.
+- `esp32-cam/esp32-cam.ino` sends binary JPEG frames through the cloud WebSocket relay and also supports direct HTTP MJPEG.
+
+## Camera Stream Recovery
+
+The camera keeps at most two cloud frames awaiting relay acknowledgement. The relay limits each viewer independently and allows a new frame after its render-ACK deadline (900 ms by default), including when the first frame came from the cache. A late ACK cannot unlock a newer frame. Socket backpressure still limits sending after a timeout.
+
+The web controller abandons a stuck JPEG decode after 1500 ms and clears the last image after 3 seconds without a successfully decoded frame. Camera connection status is separate from image freshness. Insights reports camera send FPS and relay acknowledgement time, not measured screen FPS or end-to-end latency.
+
+Direct `/stream` uses the same sensor profile as the cloud stream. Its loop services UART, cloud traffic, Wi-Fi transitions and recovery between frames, and closes when Wi-Fi provisioning starts. Camera capture and network writes can still block briefly; this is not a hard real-time transport. A simultaneous local viewer adds capture and network load.
+
+Cloud viewing does not need an HTTP stream URL. Set `NEXT_PUBLIC_ESP32_CAM_STREAM_URL` only for an explicitly reachable MJPEG endpoint; the relay does not provide `/stream`.
+
+For this recovery update, flash the ESP32-CAM sketch and deploy both `server/` and a rebuilt `rc-car-control/` on the VM. Vehicle sketches and the UART message format are unchanged. Validate power cycling, Wi-Fi switching, screen suspension and streaming with the physical boards after deployment.
 
 ## Required Arduino Libraries
 
@@ -198,11 +210,11 @@ If vehicle configuration is unavailable at camera boot, ESP32-CAM enters offline
 
 The Vehicle tab in Settings provides three persistent cloud stream profiles:
 
-- `realtime`: QVGA (`320x240`) with a 75 ms frame interval for driving.
-- `balanced`: constant CIF (`400x296`) to avoid sensor reconfiguration while the camera moves.
-- `quality`: VGA (`640x480`) while idle and CIF (`400x296`) while the camera moves.
+- `realtime`: QVGA (`320x240`), starting at a 70 ms frame interval, adapting up to 170 ms.
+- `balanced`: VGA (`640x480`), starting at 80 ms, adapting up to 190 ms.
+- `quality`: VGA (`640x480`) with less JPEG compression, starting at 70 ms, adapting up to 200 ms.
 
-The camera returns to its idle resolution about `1200 ms` after movement stops. The realtime and balanced profiles keep one resolution in both modes, avoiding a sensor pause during pan/tilt. With PSRAM, JPEG capture uses two frame buffers in continuous `CAMERA_GRAB_LATEST` mode. Realtime and balanced allow at most two cloud frames in flight to cover one network round trip; quality allows one. The relay acknowledges as soon as it forwards a frame to a ready controller, while the browser display acknowledgement independently prevents a slow phone or tablet from accumulating old frames. Excess frames are dropped instead of queued. The ESP32-CAM saves the selected profile in Preferences and reports FPS, frame RTT, frame size, RSSI, and timeout counters to Controller Insights. Without PSRAM it falls back to a single QVGA buffer.
+All profiles keep the same resolution during idle and motion; motion changes tuning rather than sensor resolution. With PSRAM, JPEG capture uses two frame buffers in continuous `CAMERA_GRAB_LATEST` mode. All three profiles allow at most two cloud frames awaiting relay ACK. The relay acknowledges forwarding to a ready viewer; the browser acknowledges JPEG decoding separately. Slow viewers do not block others, and an expired viewer ACK permits a fresh frame. Unsent excess frames are dropped, but data already buffered by TCP cannot be withdrawn. Preferences stores the selected profile. Insights reports camera send FPS, relay ACK time, frame size, RSSI and timeout counters. Without PSRAM, all profiles use a single QVGA buffer. Frame intervals are pacing settings, not guaranteed display FPS.
 
 Deploy the updated relay and web app before flashing this ESP32-CAM firmware. The new firmware expects frame acknowledgements from the relay. The relay remains compatible with the older JSON/Base64 camera frame format during migration.
 

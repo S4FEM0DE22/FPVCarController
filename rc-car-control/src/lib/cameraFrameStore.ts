@@ -3,6 +3,7 @@
 import { useSyncExternalStore } from "react";
 
 let currentFrameSource = "";
+let frameStalled = false;
 const listeners = new Set<() => void>();
 
 function subscribe(listener: () => void) {
@@ -30,6 +31,16 @@ export function setCameraFrameSource(nextSource: string) {
   if (nextSource === currentFrameSource) return;
   currentFrameSource = nextSource;
   for (const listener of listeners) listener();
+}
+
+export function setCameraFrameStalled(stalled: boolean) {
+  if (frameStalled === stalled) return;
+  frameStalled = stalled;
+  for (const listener of listeners) listener();
+}
+
+export function useCameraFrameStalled() {
+  return useSyncExternalStore(subscribe, () => frameStalled, () => false);
 }
 
 export function useCameraFrameSource() {

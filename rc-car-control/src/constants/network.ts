@@ -4,12 +4,6 @@ function normalizeBase(url: string) {
   return url.replace(/\/+$/, "");
 }
 
-function toHttp(url: string) {
-  return url
-    .replace(/^wss:\/\//i, "https://")
-    .replace(/^ws:\/\//i, "http://");
-}
-
 const cloudBase = normalizeBase(CLOUD_URL);
 
 const resolvedWsUrl =
@@ -25,8 +19,7 @@ const resolvedControllerAuthToken =
 export const CLIENT_TYPE = "web-controller";
 
 const resolvedCamStreamUrl =
-  process.env.NEXT_PUBLIC_ESP32_CAM_STREAM_URL ||
-  (cloudBase ? `${normalizeBase(toHttp(cloudBase))}/stream` : "");
+  process.env.NEXT_PUBLIC_ESP32_CAM_STREAM_URL || "";
 
 export const VEHICLE_CONFIG = {
   id: resolvedVehicleId,
