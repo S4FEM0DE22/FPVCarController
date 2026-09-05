@@ -2027,6 +2027,15 @@ void loop() {
     sendTelemetry();
   }
 
+  static unsigned long lastRemoteLogAt = 0;
+  if (wsConnected && (lastRemoteLogAt == 0 || now - lastRemoteLogAt >= 10000)) {
+    lastRemoteLogAt = now;
+    sendDeviceLog("info", String("Vehicle cloud=online RSSI=") + WiFi.RSSI() +
+      " dBm CAM UART=" + (cameraStatusFresh ? "fresh" : "stale") +
+      " CAM WiFi=" + (cameraStatusFresh ? (cameraUartWifiConnected ? "online" : "offline") : "unknown") +
+      " CAM cloud=" + (cameraStatusFresh ? (cameraUartCloudConnected ? "online" : "offline") : "unknown"));
+  }
+
   if (now - lastStatusAt > 2500) {
     lastStatusAt = now;
     sendStatus(wsConnected ? "ESP32 vehicle online" : "WebSocket disconnected");

@@ -117,10 +117,10 @@ export default function CameraPanel({
   const effectiveFrameAvailable = cameraEnabled && frameAvailable;
   const streamStatus: StreamStatus = !cameraEnabled
     ? "camera-off"
-    : effectiveFrameAvailable
-    ? "live"
     : frameStalled
     ? "stalled"
+    : effectiveFrameAvailable
+    ? "live"
     : !streamUrl
     ? "connecting"
     : !isHttpStreamUrl
@@ -155,6 +155,7 @@ export default function CameraPanel({
         <VideoStream
           streamUrl={effectiveStreamUrl}
           cameraOn={cameraEnabled}
+          showStaleIndicator={false}
           className="absolute inset-0 h-full w-full object-cover"
           onStreamLoad={() => markStream("live")}
           onStreamError={() => markStream("error")}
@@ -198,7 +199,7 @@ export default function CameraPanel({
         </div>
       </div>
 
-      {streamStatus !== "live" && (
+      {streamStatus !== "live" && !effectiveFrameAvailable && (
         <div className="pointer-events-none absolute inset-0 grid place-items-center p-6 text-center text-white">
           <div>
             {cameraEnabled ? <Camera className="mx-auto text-white/55" size={30} /> : <CameraOff className="mx-auto text-white/55" size={30} />}

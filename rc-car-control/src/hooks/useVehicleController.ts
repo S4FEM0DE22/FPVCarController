@@ -417,7 +417,6 @@ export default function useVehicleController() {
     const timer = window.setInterval(() => {
       const lastFrameAt = cameraLastFrameAtRef.current;
       if (lastFrameAt > 0 && Date.now() - lastFrameAt > CAMERA_FRAME_STALE_MS) {
-        replaceCameraFrame("");
         setCameraFrameStalled(true);
       }
       const lastSeenAt = cameraLastSeenAtRef.current;
@@ -433,7 +432,7 @@ export default function useVehicleController() {
     }, 500);
 
     return () => window.clearInterval(timer);
-  }, [connectionState, replaceCameraFrame, clearCameraFrames]);
+  }, [connectionState, clearCameraFrames]);
 
   const handleMove = useCallback(
     (

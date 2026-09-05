@@ -1983,6 +1983,21 @@ void serviceCameraRuntime() {
         config.streamProfile
       );
       sendCameraStreamStatus(cloudFps);
+      // Keep remote diagnostics sparse so logging does not compete with JPEGs.
+      static unsigned long lastRemoteLogAt = 0;
+      if (lastRemoteLogAt == 0 || now - lastRemoteLogAt >= 10000) {
+        lastRemoteLogAt = now;
+        char diagnostic[240];
+        snprintf(diagnostic, sizeof(diagnostic),
+          "Camera FPS capture=%.1f sent=%.1f ack=%.1f RTT=%lu send=%lu ms JPEG=%lu B Q=%u RSSI=%d pending=%u/%u drop=%lu reject=%lu timeout=%lu staleAck=%lu",
+          captureFps, cloudFps, ackFps, lastCloudFrameAckMs,
+          lastCloudFrameSendMs, (unsigned long)lastCloudFrameBytes,
+          cloudJpegQuality, WiFi.RSSI(), pendingCloudFrameAckCount(),
+          cloudMaxFramesInFlight, (unsigned long)cloudFramesDropped,
+          (unsigned long)cloudFramesRejected, (unsigned long)cloudFrameAckTimeouts,
+          (unsigned long)cloudStaleFrameAcks);
+        sendDeviceLog("info", diagnostic);
+      }
     } else {
       Serial.printf(
         "Camera cloud disconnected | WiFi=%s status=%d RSSI=%d dBm\n",

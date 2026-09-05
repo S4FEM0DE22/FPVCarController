@@ -10,7 +10,7 @@ This folder contains Arduino sketches for the project hardware:
 
 The camera keeps at most two cloud frames awaiting relay acknowledgement. The relay limits each viewer independently and allows a new frame after its render-ACK deadline (900 ms by default), including when the first frame came from the cache. A late ACK cannot unlock a newer frame. Socket backpressure still limits sending after a timeout.
 
-The web controller abandons a stuck JPEG decode after 1500 ms and clears the last image after 3 seconds without a successfully decoded frame. Camera connection status is separate from image freshness. Insights reports camera send FPS and relay acknowledgement time, not measured screen FPS or end-to-end latency.
+The web controller abandons a stuck JPEG decode after 1500 ms. After 3 seconds without a successfully decoded frame, it retains the last image with a stale-image warning; it does not restart the stream or replace the image with a blank screen. A confirmed offline/disconnected state still clears the image. Camera connection status is separate from image freshness. Insights reports camera send FPS and relay acknowledgement time, not measured screen FPS or end-to-end latency.
 
 Direct `/stream` uses the same sensor profile as the cloud stream. Its loop services UART, cloud traffic, Wi-Fi transitions and recovery between frames, and closes when Wi-Fi provisioning starts. Camera capture and network writes can still block briefly; this is not a hard real-time transport. A simultaneous local viewer adds capture and network load.
 
@@ -267,6 +267,18 @@ npm.cmd run dev
 cd C:\Users\safem\FPVCarController\rc-car-control
 npm.cmd run dev
 ```
+
+### Remote diagnostics without USB
+
+Insights > Device Logs receives selected firmware events, not a full USB Serial mirror.
+The vehicle reports Cloud, RSSI and fresh/stale CAM UART connectivity every 10 seconds.
+CAM reports capture/sent/ack FPS, RTT, send duration, JPEG size, quality, RSSI,
+pending frames, drops, rejections, timeouts and stale ACKs about every 12 seconds.
+These messages contain no Wi-Fi passwords or authentication tokens. The relay
+keeps the latest 80 logs in memory and replays them when a controller connects;
+times represent relay receipt, not board uptime. Export TXT works on mobile too.
+Offline boards cannot send logs; these periodic reports are not stored on the board.
+Flash CAM and the matching vehicle sketch, and update the relay for receipt times.
 
 Then configure:
 
