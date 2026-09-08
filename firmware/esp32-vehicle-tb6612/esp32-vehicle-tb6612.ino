@@ -9,6 +9,7 @@
 #include <WiFi.h>
 #include <WebSocketsClient.h>
 #include <Wire.h>
+#include <esp_system.h>
 #include <math.h>
 
 // Required libraries:
@@ -51,6 +52,21 @@ static const int OLED_WIDTH = 128;
 static const int OLED_HEIGHT = 64;
 
 static const int MOTOR_PWM_MAX = 255;
+static const uint32_t MOTOR_PWM_FREQUENCY_HZ = 20000;
+
+const char *resetReasonLabel(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON: return "POWER_ON";
+    case ESP_RST_SW: return "SOFTWARE";
+    case ESP_RST_PANIC: return "PANIC";
+    case ESP_RST_INT_WDT: return "INT_WATCHDOG";
+    case ESP_RST_TASK_WDT: return "TASK_WATCHDOG";
+    case ESP_RST_WDT: return "WATCHDOG";
+    case ESP_RST_DEEPSLEEP: return "DEEP_SLEEP";
+    case ESP_RST_BROWNOUT: return "BROWNOUT";
+    default: return "OTHER";
+  }
+}
 // Keep motor outputs inactive on normal power-up; enable only for a lifted-wheel test.
 static const bool MOTOR_BOOT_TEST_ENABLED = false;
 static const float MOTOR_BOOT_TEST_LEFT_POWER = 0.12f;
@@ -86,12 +102,17 @@ struct DriveState {
   String command = "STOP";
   float throttle = 0;
   float steering = 0;
+  float leftPower = 0;
+  float rightPower = 0;
 };
 
 struct BehaviorProfile {
   String name = "Balanced";
   float driveScale = 1.0f;
   float steeringScale = 1.0f;
+  float leftMotorScale = 1.0f;
+  float rightMotorScale = 1.0f;
+  float minimumMotorPower = 0.18f;
   int cameraStepDeg = 6;
   float throttleExponent = 1.0f;
   String note = "Stable default mapping for general driving.";
@@ -392,6 +413,15 @@ void loadConfig() {
   prefs.getString("vehicleId", config.vehicleId, sizeof(config.vehicleId));
   prefs.getString("authToken", config.authToken, sizeof(config.authToken));
   prefs.getString("controlUrl", config.controlUrl, sizeof(config.controlUrl));
+  behaviorProfile.name = prefs.getString("profName", behaviorProfile.name);
+  behaviorProfile.driveScale = clampFloat(prefs.getFloat("driveScale", behaviorProfile.driveScale), 0.3f, 2.0f);
+  behaviorProfile.steeringScale = clampFloat(prefs.getFloat("steerScale", behaviorProfile.steeringScale), 0.3f, 2.0f);
+  behaviorProfile.leftMotorScale = clampFloat(prefs.getFloat("leftGain", behaviorProfile.leftMotorScale), 0.5f, 1.2f);
+  behaviorProfile.rightMotorScale = clampFloat(prefs.getFloat("rightGain", behaviorProfile.rightMotorScale), 0.5f, 1.2f);
+  behaviorProfile.minimumMotorPower = clampFloat(prefs.getFloat("motorMin", behaviorProfile.minimumMotorPower), 0.0f, 0.45f);
+  behaviorProfile.cameraStepDeg = clampInt(prefs.getInt("camStep", behaviorProfile.cameraStepDeg), 1, 12);
+  behaviorProfile.throttleExponent = clampFloat(prefs.getFloat("throttleExp", behaviorProfile.throttleExponent), 0.5f, 2.5f);
+  behaviorProfile.note = prefs.getString("profNote", behaviorProfile.note);
   prefs.end();
 }
 
@@ -406,6 +436,20 @@ void saveConfig() {
   prefs.putString("vehicleId", config.vehicleId);
   prefs.putString("authToken", config.authToken);
   prefs.putString("controlUrl", config.controlUrl);
+  prefs.end();
+}
+
+void saveBehaviorProfile() {
+  prefs.begin("fpv-car", false);
+  prefs.putString("profName", behaviorProfile.name);
+  prefs.putFloat("driveScale", behaviorProfile.driveScale);
+  prefs.putFloat("steerScale", behaviorProfile.steeringScale);
+  prefs.putFloat("leftGain", behaviorProfile.leftMotorScale);
+  prefs.putFloat("rightGain", behaviorProfile.rightMotorScale);
+  prefs.putFloat("motorMin", behaviorProfile.minimumMotorPower);
+  prefs.putInt("camStep", behaviorProfile.cameraStepDeg);
+  prefs.putFloat("throttleExp", behaviorProfile.throttleExponent);
+  prefs.putString("profNote", behaviorProfile.note);
   prefs.end();
 }
 
@@ -505,6 +549,14 @@ void setMotorRaw(int in1, int in2, int pwmPin, float value) {
   analogWrite(pwmPin, pwm);
 }
 
+float calibratedMotorPower(float value, float motorScale) {
+  if (fabs(value) <= 0.02f) return 0.0f;
+  float magnitude = clampFloat(fabs(value) * motorScale, 0.0f, 1.0f);
+  magnitude = behaviorProfile.minimumMotorPower +
+    (1.0f - behaviorProfile.minimumMotorPower) * magnitude;
+  return value < 0 ? -magnitude : magnitude;
+}
+
 void applyDrive(float throttle, float steering) {
   throttle = clampFloat(throttle, -1, 1);
   steering = clampFloat(steering, -1, 1);
@@ -526,6 +578,11 @@ void applyDrive(float throttle, float steering) {
   }
   left = clampFloat(left, -1, 1);
   right = clampFloat(right, -1, 1);
+
+  left = calibratedMotorPower(left, behaviorProfile.leftMotorScale);
+  right = calibratedMotorPower(right, behaviorProfile.rightMotorScale);
+  drive.leftPower = left;
+  drive.rightPower = right;
 
   if (fabs(left) <= 0.02f && fabs(right) <= 0.02f) {
     setMotorRaw(PIN_AIN1, PIN_AIN2, PIN_PWMA, 0);
@@ -1018,6 +1075,8 @@ void sendTelemetry() {
   driveState["command"] = drive.command;
   driveState["throttle"] = drive.throttle;
   driveState["steering"] = drive.steering;
+  driveState["leftPower"] = drive.leftPower;
+  driveState["rightPower"] = drive.rightPower;
 
   doc["lightOn"] = lightOn;
   doc["cameraTilt"] = tiltDeg;
@@ -1029,6 +1088,9 @@ void sendTelemetry() {
   profile["name"] = behaviorProfile.name;
   profile["driveScale"] = behaviorProfile.driveScale;
   profile["steeringScale"] = behaviorProfile.steeringScale;
+  profile["leftMotorScale"] = behaviorProfile.leftMotorScale;
+  profile["rightMotorScale"] = behaviorProfile.rightMotorScale;
+  profile["minimumMotorPower"] = behaviorProfile.minimumMotorPower;
   profile["cameraStepDeg"] = behaviorProfile.cameraStepDeg;
   profile["throttleExponent"] = behaviorProfile.throttleExponent;
   profile["note"] = behaviorProfile.note;
@@ -1169,11 +1231,23 @@ void applyBehaviorProfile(JsonObject payload) {
       clampFloat(payloadNumber(profile, "driveScale", behaviorProfile.driveScale), 0.3f, 2.0f);
   behaviorProfile.steeringScale =
       clampFloat(payloadNumber(profile, "steeringScale", behaviorProfile.steeringScale), 0.3f, 2.0f);
+  behaviorProfile.leftMotorScale =
+      clampFloat(payloadNumber(profile, "leftMotorScale", behaviorProfile.leftMotorScale), 0.5f, 1.2f);
+  behaviorProfile.rightMotorScale =
+      clampFloat(payloadNumber(profile, "rightMotorScale", behaviorProfile.rightMotorScale), 0.5f, 1.2f);
+  behaviorProfile.minimumMotorPower =
+      clampFloat(payloadNumber(profile, "minimumMotorPower", behaviorProfile.minimumMotorPower), 0.0f, 0.45f);
   behaviorProfile.cameraStepDeg =
       clampInt((int)round(payloadNumber(profile, "cameraStepDeg", behaviorProfile.cameraStepDeg)), 1, 12);
   behaviorProfile.throttleExponent =
       clampFloat(payloadNumber(profile, "throttleExponent", behaviorProfile.throttleExponent), 0.5f, 2.5f);
   behaviorProfile.note = payloadString(profile, "note", behaviorProfile.note);
+  saveBehaviorProfile();
+  sendDeviceLog(
+      "info",
+      String("Motor tuning left=") + String(behaviorProfile.leftMotorScale, 2) +
+          " right=" + String(behaviorProfile.rightMotorScale, 2) +
+          " start=" + String((int)round(behaviorProfile.minimumMotorPower * 100.0f)) + "%");
 }
 
 void resetSharedWifi(const char *commandId) {
@@ -1326,6 +1400,7 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
     sendIdentify();
     sendStatus("ESP32 vehicle connected");
     sendDeviceLog("info", "WebSocket connected");
+    sendDeviceLog("info", String("ESP32 boot reason=") + resetReasonLabel(esp_reset_reason()));
     if (
       wifiTransactionCommandId.length() > 0 &&
       wifiCoordinatorState != "idle"
@@ -1774,6 +1849,20 @@ void setupPins() {
   digitalWrite(PIN_BUZZER, LOW);
 }
 
+void configureMotorPwm() {
+  // Attach both enable inputs at zero duty before changing their PWM timing.
+  analogWrite(PIN_PWMA, 0);
+  analogWrite(PIN_PWMB, 0);
+
+  const uint8_t motorPins[] = {PIN_PWMA, PIN_PWMB};
+  for (uint8_t pin : motorPins) {
+    analogWriteFrequency(pin, MOTOR_PWM_FREQUENCY_HZ);
+    analogWriteResolution(pin, 8);
+    analogWrite(pin, 0);
+  }
+  Serial.printf("Motor PWM: %lu Hz\n", (unsigned long)MOTOR_PWM_FREQUENCY_HZ);
+}
+
 void startBuzzer() {
   digitalWrite(PIN_BUZZER, LOW);
   digitalWrite(PIN_BUZZER, HIGH);
@@ -1864,6 +1953,7 @@ void setup() {
   Serial.begin(115200);
   // Put every motor input in a known stopped state before any other startup work.
   setupPins();
+  configureMotorPwm();
   cameraUart.setRxBufferSize(2048);
   cameraUart.begin(CAM_UART_BAUD, SERIAL_8N1, PIN_CAM_UART_RX, PIN_CAM_UART_TX);
   delay(300);

@@ -111,6 +111,15 @@ Both vehicle sketches use one fixed OLED dashboard so the important information 
 
 The horn output is intended for an active 3.3V buzzer: connect buzzer `+` to `GPIO4` and buzzer `-` to `GND`. The firmware drives `GPIO4` HIGH for 300 ms when `HORN` is received, without PWM. Use a transistor or MOSFET if the buzzer module draws more current than an ESP32 GPIO can safely supply.
 
+Motor PWM runs at `20 kHz`, above the most audible range and within the supported
+PWM range of both drivers. Vehicle settings include independent left/right motor
+scales and a minimum starting power. The default starting power is `18%`; raise it
+only until a loaded wheel starts reliably. For straight-line calibration, leave the
+weaker side at `1.00` and reduce the stronger side. The profile is stored in the
+vehicle ESP32 Preferences and survives a restart. The displayed left/right power is
+the calibrated PWM command, not measured wheel speed; matching real RPM precisely
+still requires wheel encoders.
+
 At boot the OLED shows `FPV CAR` while the system starts. A remote reboot shows `RESTARTING`, and the shared Wi-Fi reset shows `RESET WIFI` while both boards are cleared over UART. A physical power cut removes power from the OLED immediately, so showing `POWER OFF` after the switch is turned off requires a separate standby supply or small backup capacitor circuit.
 
 The OLED is optional. If no display is detected at `0x3C`, the vehicle prints a message to Serial Monitor and continues normally. If your module uses address `0x3D`, change `OLED_I2C_ADDRESS` near the top of the selected vehicle sketch.

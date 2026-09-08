@@ -28,6 +28,8 @@ interface CameraPanelProps {
   lastAction?: string;
   driveThrottle?: number;
   driveSteering?: number;
+  driveLeftPower?: number;
+  driveRightPower?: number;
   actionPressed?: boolean;
   cameraPan?: number;
   cameraTilt?: number;
@@ -85,6 +87,8 @@ export default function CameraPanel({
   lastCommand = "STOP",
   driveThrottle,
   driveSteering,
+  driveLeftPower,
+  driveRightPower,
   cameraPan = 95,
   cameraTilt = 64,
   connectionState = "DISCONNECTED",
@@ -129,7 +133,7 @@ export default function CameraPanel({
   const streamMeta = streamStatusMeta(streamStatus);
   const trackPower =
     typeof driveThrottle === "number" && typeof driveSteering === "number"
-      ? trackPowerFromDrive(driveThrottle, driveSteering)
+      ? trackPowerFromDrive(driveThrottle, driveSteering, driveLeftPower, driveRightPower)
       : trackPowerFromCommand(lastCommand);
   const driveLabel = driveStateLabel(trackPower.left, trackPower.right);
   const cameraAim = formatCameraAim(cameraPan, cameraTilt);

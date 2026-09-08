@@ -32,6 +32,9 @@ export interface VehicleSoftCodeProfile {
   name: string;
   driveScale: number;
   steeringScale: number;
+  leftMotorScale: number;
+  rightMotorScale: number;
+  minimumMotorPower: number;
   cameraStepDeg: number;
   throttleExponent: number;
   note: string;
@@ -43,6 +46,8 @@ export interface VehicleDriveState {
   command: ControlCommand;
   throttle: number;
   steering: number;
+  leftPower?: number;
+  rightPower?: number;
 }
 
 export interface VehicleFailureState {

@@ -39,6 +39,8 @@ interface MobileOverviewPanelProps {
   lastCommand: string;
   driveThrottle?: number;
   driveSteering?: number;
+  driveLeftPower?: number;
+  driveRightPower?: number;
   lastAction: string;
   actionPressed: boolean;
   inputMode: InputMode;
@@ -93,6 +95,8 @@ export default function MobileOverviewPanel({
   lastCommand,
   driveThrottle,
   driveSteering,
+  driveLeftPower,
+  driveRightPower,
   lastAction,
   actionPressed,
   inputMode,
@@ -105,7 +109,7 @@ export default function MobileOverviewPanel({
   const ready = cloudConnected && vehicleOnline;
   const trackPower =
     typeof driveThrottle === "number" && typeof driveSteering === "number"
-      ? trackPowerFromDrive(driveThrottle, driveSteering)
+      ? trackPowerFromDrive(driveThrottle, driveSteering, driveLeftPower, driveRightPower)
       : trackPowerFromCommand(lastCommand);
   const cameraAim = formatCameraAim(cameraPan, cameraTilt);
   const InputIcon = inputMode === "gamepad" ? Gamepad2 : inputMode === "touch" ? Smartphone : Keyboard;
