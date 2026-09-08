@@ -73,7 +73,6 @@ static const float MOTOR_BOOT_TEST_LEFT_POWER = 0.12f;
 static const float MOTOR_BOOT_TEST_RIGHT_POWER = 0.12f;
 static const unsigned long MOTOR_BOOT_TEST_MS = 1500;
 static const unsigned long MOTOR_BOOT_TEST_PAUSE_MS = 700;
-static const unsigned long SERVO_BOOT_TEST_HOLD_MS = 1000;
 static const char *SETUP_AP_SSID = "FPV-Car-Setup";
 static const char *DEVICE_AP_PASSWORD = "12345678";
 // Safe limits for small plastic-gear 180-degree servos.
@@ -1874,43 +1873,18 @@ void stopBuzzer() {
   buzzerOffAt = 0;
 }
 
-void testServosOnBoot() {
-  Serial.println("Servo boot test: 180 position test");
+void homeCameraOnBoot() {
+  Serial.println("Camera boot position: HOME");
   writePanServo(SERVO_PAN_CENTER);
   writeTiltServo(SERVO_TILT_HOME);
   showOledMessage(
-    "SERVO TEST",
+    "CAMERA HOME",
     String("HOME P") + panDeg + " T" + tiltDeg
   );
   printServoTargets();
-  delay(SERVO_BOOT_TEST_HOLD_MS);
-
-  writePanServo(130);
-  writeTiltServo(95);
-  showOledMessage(
-    "SERVO TEST",
-    String("POS1 P") + panDeg + " T" + tiltDeg
-  );
-  printServoTargets();
-  delay(SERVO_BOOT_TEST_HOLD_MS);
-
-  writePanServo(50);
-  writeTiltServo(45);
-  showOledMessage(
-    "SERVO TEST",
-    String("POS2 P") + panDeg + " T" + tiltDeg
-  );
-  printServoTargets();
-  delay(SERVO_BOOT_TEST_HOLD_MS);
-
-  writePanServo(SERVO_PAN_CENTER);
-  writeTiltServo(SERVO_TILT_HOME);
-  showOledMessage(
-    "SERVO TEST",
-    String("HOME P") + panDeg + " T" + tiltDeg
-  );
-  printServoTargets();
-  delay(SERVO_BOOT_TEST_HOLD_MS);
+  delay(600);
+  // Repeat once after the servo power and pulse train have settled.
+  writeCameraServos();
 }
 
 void setBootMotorPower(float left, float right) {
@@ -1953,7 +1927,6 @@ void setup() {
   Serial.begin(115200);
   // Put every motor input in a known stopped state before any other startup work.
   setupPins();
-  configureMotorPwm();
   cameraUart.setRxBufferSize(2048);
   cameraUart.begin(CAM_UART_BAUD, SERIAL_8N1, PIN_CAM_UART_RX, PIN_CAM_UART_TX);
   delay(300);
@@ -1972,7 +1945,9 @@ void setup() {
   Serial.print(PIN_SERVO_PAN);
   Serial.print(", tilt GPIO");
   Serial.println(PIN_SERVO_TILT);
-  testServosOnBoot();
+  homeCameraOnBoot();
+  // Let ESP32Servo reserve its LEDC resources before attaching motor PWM.
+  configureMotorPwm();
   testMotorsOnBoot();
   stopDrive();
   setupWiFiManager();
