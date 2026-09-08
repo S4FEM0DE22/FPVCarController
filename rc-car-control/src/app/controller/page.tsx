@@ -322,6 +322,8 @@ export default function ControllerPage() {
                   lastCommand={lastCommand}
                   driveThrottle={telemetry.driveState.throttle}
                   driveSteering={telemetry.driveState.steering}
+                  driveLeftPower={telemetry.driveState.leftPower}
+                  driveRightPower={telemetry.driveState.rightPower}
                   lastAction={lastAction}
                   actionPressed={actionPressed}
                   cameraPan={cameraPanDeg}
@@ -391,6 +393,8 @@ export default function ControllerPage() {
                       lastCommand={lastCommand}
                       driveThrottle={telemetry.driveState.throttle}
                       driveSteering={telemetry.driveState.steering}
+                      driveLeftPower={telemetry.driveState.leftPower}
+                      driveRightPower={telemetry.driveState.rightPower}
                       lastAction={lastAction}
                       actionPressed={actionPressed}
                       inputMode={inputMode}
@@ -414,6 +418,8 @@ export default function ControllerPage() {
                       lastCommand={lastCommand}
                       driveThrottle={telemetry.driveState.throttle}
                       driveSteering={telemetry.driveState.steering}
+                      driveLeftPower={telemetry.driveState.leftPower}
+                      driveRightPower={telemetry.driveState.rightPower}
                       lastAction={lastAction}
                       actionPressed={actionPressed}
                       inputMode={inputMode}

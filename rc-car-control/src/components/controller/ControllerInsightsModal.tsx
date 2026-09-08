@@ -88,6 +88,42 @@ function cameraStreamProfileLabel(profile?: CameraStreamStatusMessage["profile"]
   return "รอข้อมูล";
 }
 
+function cameraConnectionDiagnosis(status: CameraStreamStatusMessage | null) {
+  if (!status) {
+    return {
+      label: "ยังแยกสาเหตุไม่ได้",
+      detail: "รอข้อมูลสถานะจาก ESP32-CAM",
+      tone: "border-slate-200 bg-slate-50 text-slate-700",
+    };
+  }
+  if (status.rssi <= -75) {
+    return {
+      label: "สัญญาณ Wi-Fi กล้องอ่อน",
+      detail: `RSSI ${status.rssi} dBm ควรตรวจเสา ตำแหน่งกล้อง และจุดกระจายสัญญาณ`,
+      tone: "border-amber-200 bg-amber-50 text-amber-900",
+    };
+  }
+  if (status.ackMs >= 300) {
+    return {
+      label: "เส้นทางไป Cloud ตอบช้า",
+      detail: `Relay ตอบกลับ ${status.ackMs} ms ขณะที่ Wi-Fi กล้องอยู่ที่ ${status.rssi} dBm`,
+      tone: "border-amber-200 bg-amber-50 text-amber-900",
+    };
+  }
+  if (status.fps < 2) {
+    return {
+      label: "กล้องส่งภาพออกช้า",
+      detail: `ส่งเพียง ${status.fps.toFixed(1)} FPS แม้ Wi-Fi และ Relay ยังอยู่ในช่วงใช้งานได้`,
+      tone: "border-amber-200 bg-amber-50 text-amber-900",
+    };
+  }
+  return {
+    label: "เส้นทางกล้องปกติ",
+    detail: `Wi-Fi ${status.rssi} dBm · Relay ${status.ackMs} ms · ${status.fps.toFixed(1)} FPS`,
+    tone: "border-emerald-200 bg-emerald-50 text-emerald-900",
+  };
+}
+
 export default function ControllerInsightsModal({
   open,
   onClose,
@@ -106,6 +142,7 @@ export default function ControllerInsightsModal({
 }: ControllerInsightsModalProps) {
   const [tab, setTab] = useState<TabKey>("telemetry");
   const [logFilter, setLogFilter] = useState<LogFilter>("all");
+  const cameraDiagnosis = cameraConnectionDiagnosis(cameraStreamStatus);
 
   const exportHistoryAsJson = () => {
     const payload = {
@@ -308,7 +345,11 @@ export default function ControllerInsightsModal({
                     {cameraStreamProfileLabel(cameraStreamStatus?.profile)}
                   </span>
                 </div>
-                <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                <div className={`mt-3 rounded-lg border px-3 py-2 text-xs ${cameraDiagnosis.tone}`}>
+                  <p className="font-semibold">{cameraDiagnosis.label}</p>
+                  <p className="mt-0.5 opacity-80">{cameraDiagnosis.detail}</p>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
                   <div className="rounded-lg bg-white/55 p-2">
                     <p className="text-slate-400">กล้องส่ง (FPS)</p>
                     <p className="mt-1 font-semibold text-slate-900">{cameraStreamStatus?.fps.toFixed(1) ?? "-"}</p>
@@ -324,6 +365,14 @@ export default function ControllerInsightsModal({
                   <div className="rounded-lg bg-white/55 p-2">
                     <p className="text-slate-400">Mode</p>
                     <p className="mt-1 font-semibold text-slate-900">{cameraStreamStatus?.mode ?? "-"}</p>
+                  </div>
+                  <div className="rounded-lg bg-white/55 p-2">
+                    <p className="text-slate-400">Wi-Fi กล้อง</p>
+                    <p className="mt-1 font-semibold text-slate-900">{cameraStreamStatus ? `${cameraStreamStatus.rssi} dBm` : "-"}</p>
+                  </div>
+                  <div className="rounded-lg bg-white/55 p-2">
+                    <p className="text-slate-400">Timeout สะสม</p>
+                    <p className="mt-1 font-semibold text-slate-900">{cameraStreamStatus?.timeouts ?? "-"}</p>
                   </div>
                 </div>
               </div>

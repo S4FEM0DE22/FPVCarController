@@ -95,8 +95,16 @@ export function formatCameraAim(pan: number, tilt: number) {
 
 export function trackPowerFromDrive(
   throttle: number,
-  steering: number
+  steering: number,
+  leftOutput?: number,
+  rightOutput?: number
 ): { left: number; right: number } {
+  if (typeof leftOutput === "number" && typeof rightOutput === "number") {
+    return {
+      left: Math.round(Math.max(-1, Math.min(1, leftOutput)) * 100),
+      right: Math.round(Math.max(-1, Math.min(1, rightOutput)) * 100),
+    };
+  }
   const safeThrottle = Math.max(-1, Math.min(1, throttle));
   const safeSteering = Math.max(-1, Math.min(1, steering));
   // Match the proportional differential mix used by both vehicle firmwares.

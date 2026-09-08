@@ -1080,6 +1080,60 @@ export default function SettingsPanel({
 
                 <div>
                   <label className="mb-1 block text-xs font-medium text-slate-500">
+                    ชดเชยมอเตอร์ซ้าย {profileDraft.leftMotorScale.toFixed(2)} เท่า
+                  </label>
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="1.2"
+                    step="0.01"
+                    value={profileDraft.leftMotorScale}
+                    onChange={(e) =>
+                      setProfileDraft((prev) => ({ ...prev, leftMotorScale: Number(e.target.value) }))
+                    }
+                    className="w-full accent-slate-950"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-500">
+                    ชดเชยมอเตอร์ขวา {profileDraft.rightMotorScale.toFixed(2)} เท่า
+                  </label>
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="1.2"
+                    step="0.01"
+                    value={profileDraft.rightMotorScale}
+                    onChange={(e) =>
+                      setProfileDraft((prev) => ({ ...prev, rightMotorScale: Number(e.target.value) }))
+                    }
+                    className="w-full accent-slate-950"
+                  />
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="mb-1 block text-xs font-medium text-slate-500">
+                    กำลังขั้นต่ำให้ล้อเริ่มหมุน {Math.round(profileDraft.minimumMotorPower * 100)}%
+                  </label>
+                  <input
+                    type="range"
+                    min="0"
+                    max="0.45"
+                    step="0.01"
+                    value={profileDraft.minimumMotorPower}
+                    onChange={(e) =>
+                      setProfileDraft((prev) => ({ ...prev, minimumMotorPower: Number(e.target.value) }))
+                    }
+                    className="w-full accent-slate-950"
+                  />
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    ยกล้อก่อนจูน เพิ่มทีละน้อยจนมอเตอร์ทั้งสองเริ่มหมุน และลดค่าฝั่งที่แรงกว่า
+                  </p>
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-500">
                     ระยะขยับกล้อง {profileDraft.cameraStepDeg.toFixed(0)} องศา
                   </label>
                   <input
@@ -1125,6 +1179,8 @@ export default function SettingsPanel({
                 <div className="mt-2 grid gap-2 text-sm text-slate-700 sm:grid-cols-2">
                   <p>Drive: {profileDraft.driveScale.toFixed(2)}x</p>
                   <p>Steering: {profileDraft.steeringScale.toFixed(2)}x</p>
+                  <p>Left / Right: {profileDraft.leftMotorScale.toFixed(2)}x / {profileDraft.rightMotorScale.toFixed(2)}x</p>
+                  <p>Motor Start: {Math.round(profileDraft.minimumMotorPower * 100)}%</p>
                   <p>Camera Step: {profileDraft.cameraStepDeg} deg</p>
                   <p>Throttle Curve: {profileDraft.throttleExponent.toFixed(2)}</p>
                 </div>
