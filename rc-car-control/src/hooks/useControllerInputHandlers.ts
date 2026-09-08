@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, type MutableRefObject } from "react";
 import { clamp } from "@/lib/math";
+import { normalizeDriveInput } from "@/lib/driveInput";
 import type { ActionCommand, ControlCommand } from "@/types/control";
 import type { ControllerTuningSettings } from "@/components/controller/ControllerInsightsModal";
 
@@ -16,13 +17,6 @@ interface UseControllerInputHandlersOptions {
   handleGamepadAction: (action: ActionCommand, payload?: Record<string, unknown>) => void;
 }
 
-function applyDeadzoneAndGain(value: number, gain: number, deadzone: number) {
-  const scaled = clamp(value * gain, -1, 1);
-  if (Math.abs(scaled) < deadzone) return 0;
-  return Number(scaled.toFixed(3));
-}
-
-const MOVE_SEND_INTERVAL_MS = 130;
 const ACTION_SEND_INTERVAL_MS = 220;
 
 function shouldSendTimed(
@@ -45,9 +39,7 @@ export default function useControllerInputHandlers({
   handleGamepadMove,
   handleGamepadAction,
 }: UseControllerInputHandlersOptions) {
-  const lastTouchMoveAtRef = useRef(0);
   const lastTouchActionAtRef = useRef(0);
-  const lastGamepadMoveAtRef = useRef(0);
   const lastGamepadActionAtRef = useRef(0);
 
   const handleTouchMoveWithTuning = useCallback(
@@ -68,30 +60,19 @@ export default function useControllerInputHandlers({
         return;
       }
 
-      const steering = applyDeadzoneAndGain(
-        steeringRaw,
-        tuning.touchSteeringGain,
-        tuning.touchDeadzone
-      );
-      const throttle = applyDeadzoneAndGain(
+      const normalized = normalizeDriveInput(
         throttleRaw,
-        tuning.touchThrottleGain,
-        tuning.touchDeadzone
+        steeringRaw,
+        {
+          throttleGain: tuning.touchThrottleGain,
+          steeringGain: tuning.touchSteeringGain,
+          deadzone: tuning.touchDeadzone,
+        }
       );
 
-      nextPayload.steering = steering;
-      nextPayload.throttle = throttle;
-
-      const nextCommand = steering === 0 && throttle === 0 ? "STOP" : command;
-
-      if (
-        nextCommand !== "STOP" &&
-        !shouldSendTimed(lastTouchMoveAtRef, MOVE_SEND_INTERVAL_MS)
-      ) {
-        return;
-      }
-
-      handleTouchMove(nextCommand, nextPayload);
+      nextPayload.steering = normalized.steering;
+      nextPayload.throttle = normalized.throttle;
+      handleTouchMove(normalized.command, nextPayload);
     },
     [handleTouchMove, onUserInput, tuning]
   );
@@ -139,12 +120,6 @@ export default function useControllerInputHandlers({
   const handleGamepadMoveWithWatchdog = useCallback(
     (command: ControlCommand, payload?: Record<string, unknown>) => {
       onUserInput();
-      if (
-        command !== "STOP" &&
-        !shouldSendTimed(lastGamepadMoveAtRef, MOVE_SEND_INTERVAL_MS)
-      ) {
-        return;
-      }
       handleGamepadMove(command, payload);
     },
     [handleGamepadMove, onUserInput]

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { clamp } from "@/lib/math";
+import { resolveDriveCommand } from "@/lib/driveInput";
 import type { ControlCommand } from "@/types/control";
 
 interface VirtualJoystickProps {
@@ -12,9 +13,8 @@ interface VirtualJoystickProps {
 
 type Point = { x: number; y: number };
 
-function round3(value: number) {
-  return Number(value.toFixed(3));
-}
+const MOVE_SEND_INTERVAL_MS = 100;
+const MOVE_HEARTBEAT_INTERVAL_MS = 250;
 
 export default function VirtualJoystick({
   onMove,
@@ -23,7 +23,10 @@ export default function VirtualJoystick({
 }: VirtualJoystickProps) {
   const baseRef = useRef<HTMLDivElement | null>(null);
   const activeRef = useRef(false);
+  const activePointerIdRef = useRef<number | null>(null);
   const repeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pendingSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastMoveSentAtRef = useRef(0);
   const currentCommandRef = useRef<ControlCommand>("STOP");
   const currentPayloadRef = useRef<Record<string, unknown>>({
     throttle: 0,
@@ -46,47 +49,59 @@ export default function VirtualJoystick({
       if (repeatTimerRef.current) {
         clearInterval(repeatTimerRef.current);
       }
+      if (pendingSendTimerRef.current) {
+        clearTimeout(pendingSendTimerRef.current);
+      }
+      if (activeRef.current) {
+        onMoveRef.current("STOP", { throttle: 0, steering: 0 });
+      }
     };
   }, []);
 
-  const resetStick = () => {
+  const sendCurrentMove = () => {
+    const now = Date.now();
+    const elapsed = now - lastMoveSentAtRef.current;
+
+    if (elapsed >= MOVE_SEND_INTERVAL_MS) {
+      lastMoveSentAtRef.current = now;
+      onMoveRef.current(currentCommandRef.current, currentPayloadRef.current);
+      return;
+    }
+
+    if (pendingSendTimerRef.current) return;
+    pendingSendTimerRef.current = setTimeout(() => {
+      pendingSendTimerRef.current = null;
+      if (!activeRef.current) return;
+      lastMoveSentAtRef.current = Date.now();
+      onMoveRef.current(currentCommandRef.current, currentPayloadRef.current);
+    }, MOVE_SEND_INTERVAL_MS - elapsed);
+  };
+
+  const resetStick = (pointerId?: number) => {
+    if (!activeRef.current) return;
+    if (
+      pointerId !== undefined &&
+      activePointerIdRef.current !== null &&
+      pointerId !== activePointerIdRef.current
+    ) {
+      return;
+    }
+
     activeRef.current = false;
+    activePointerIdRef.current = null;
     if (repeatTimerRef.current) {
       clearInterval(repeatTimerRef.current);
       repeatTimerRef.current = null;
     }
+    if (pendingSendTimerRef.current) {
+      clearTimeout(pendingSendTimerRef.current);
+      pendingSendTimerRef.current = null;
+    }
+    lastMoveSentAtRef.current = 0;
     currentCommandRef.current = "STOP";
     currentPayloadRef.current = { throttle: 0, steering: 0 };
     setStick({ x: 0, y: 0 });
     onMoveRef.current("STOP", { throttle: 0, steering: 0 });
-  };
-
-  const resolveCommand = (x: number, y: number): ControlCommand => {
-    const deadzone = 0.22;
-
-    const nx = x / maxDistance;
-    const ny = y / maxDistance;
-
-    const ax = Math.abs(nx);
-    const ay = Math.abs(ny);
-
-    if (ax < deadzone && ay < deadzone) return "STOP";
-
-    const left = nx < -deadzone;
-    const right = nx > deadzone;
-    const up = ny < -deadzone;
-    const down = ny > deadzone;
-
-    if (up && left) return "FORWARD_LEFT";
-    if (up && right) return "FORWARD_RIGHT";
-    if (down && left) return "BACKWARD_LEFT";
-    if (down && right) return "BACKWARD_RIGHT";
-    if (up) return "FORWARD";
-    if (down) return "BACKWARD";
-    if (left) return "LEFT";
-    if (right) return "RIGHT";
-
-    return "STOP";
   };
 
   const updateFromClientPoint = (clientX: number, clientY: number) => {
@@ -108,20 +123,20 @@ export default function VirtualJoystick({
       dy = Math.sin(angle) * maxDistance;
     }
 
-    const steering = round3(clamp(dx / maxDistance, -1, 1));
-    const throttle = round3(clamp(-dy / maxDistance, -1, 1));
-    const command = resolveCommand(dx, dy);
+    const steering = Number(clamp(dx / maxDistance, -1, 1).toFixed(3));
+    const throttle = Number(clamp(-dy / maxDistance, -1, 1).toFixed(3));
+    const command = resolveDriveCommand(throttle, steering);
 
     setStick({ x: dx, y: dy });
     currentCommandRef.current = command;
     currentPayloadRef.current = { throttle, steering };
-    onMoveRef.current(command, currentPayloadRef.current);
+    sendCurrentMove();
 
     if (!repeatTimerRef.current) {
       repeatTimerRef.current = setInterval(() => {
         if (!activeRef.current || currentCommandRef.current === "STOP") return;
-        onMoveRef.current(currentCommandRef.current, currentPayloadRef.current);
-      }, 250);
+        sendCurrentMove();
+      }, MOVE_HEARTBEAT_INTERVAL_MS);
     }
   };
 
@@ -131,19 +146,21 @@ export default function VirtualJoystick({
       className="relative touch-none select-none rounded-full border border-slate-200 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.98),rgba(241,245,249,0.9))] shadow-inner"
       style={{ width: size, height: size }}
       onPointerDown={(e) => {
+        if (activePointerIdRef.current !== null) return;
+        e.preventDefault();
         activeRef.current = true;
+        activePointerIdRef.current = e.pointerId;
         (e.currentTarget as HTMLDivElement).setPointerCapture?.(e.pointerId);
         updateFromClientPoint(e.clientX, e.clientY);
       }}
       onPointerMove={(e) => {
-        if (!activeRef.current) return;
+        if (!activeRef.current || activePointerIdRef.current !== e.pointerId) return;
+        e.preventDefault();
         updateFromClientPoint(e.clientX, e.clientY);
       }}
-      onPointerUp={resetStick}
-      onPointerCancel={resetStick}
-      onPointerLeave={() => {
-        if (activeRef.current) resetStick();
-      }}
+      onPointerUp={(e) => resetStick(e.pointerId)}
+      onPointerCancel={(e) => resetStick(e.pointerId)}
+      onLostPointerCapture={(e) => resetStick(e.pointerId)}
     >
       <div className="absolute inset-1/2 h-0.5 w-[78%] -translate-x-1/2 -translate-y-1/2 bg-slate-300" />
       <div className="absolute inset-1/2 h-[78%] w-0.5 -translate-x-1/2 -translate-y-1/2 bg-slate-300" />

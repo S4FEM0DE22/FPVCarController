@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { clamp } from "@/lib/math";
+import { normalizeDriveInput } from "@/lib/driveInput";
 import type { ActionCommand, ControlCommand } from "@/types/control";
 
 interface GamepadControlProps {
@@ -17,8 +18,16 @@ interface GamepadControlProps {
 function findConnectedGamepad() {
   if (typeof navigator === "undefined" || !navigator.getGamepads) return null;
   const pads = Array.from(navigator.getGamepads());
-  return pads.find((pad) => pad?.connected) ?? null;
+  return (
+    pads.find((pad) => pad?.connected && pad.mapping === "standard") ??
+    pads.find((pad) => pad?.connected) ??
+    null
+  );
 }
+
+const GAMEPAD_DEADZONE = 0.14;
+const MOVE_SEND_INTERVAL_MS = 100;
+const MOVE_HEARTBEAT_INTERVAL_MS = 250;
 
 function resolveCameraAction(
   rx: number,
@@ -123,27 +132,20 @@ export default function useGamepadControl({
         const ly = clamp(pad.axes[1] || 0, -1, 1);
         const rx = clamp(pad.axes[2] || 0, -1, 1);
         const ry = clamp(pad.axes[3] || 0, -1, 1);
-        const deadzone = 0.18;
-
-        const steering = Math.abs(lx) < deadzone ? 0 : Number(lx.toFixed(3));
-        const throttle = Math.abs(ly) < deadzone ? 0 : Number((-ly).toFixed(3));
-
-        let command: ControlCommand = "STOP";
-        if (throttle > 0 && steering < 0) command = "FORWARD_LEFT";
-        else if (throttle > 0 && steering > 0) command = "FORWARD_RIGHT";
-        else if (throttle < 0 && steering < 0) command = "BACKWARD_LEFT";
-        else if (throttle < 0 && steering > 0) command = "BACKWARD_RIGHT";
-        else if (throttle > 0) command = "FORWARD";
-        else if (throttle < 0) command = "BACKWARD";
-        else if (steering < 0) command = "LEFT";
-        else if (steering > 0) command = "RIGHT";
+        const { throttle, steering, command } = normalizeDriveInput(-ly, lx, {
+          deadzone: GAMEPAD_DEADZONE,
+        });
 
         const isActive = throttle !== 0 || steering !== 0;
         const moveKey = `${command}:${throttle}:${steering}`;
 
         if (isActive) {
           hadActiveInput = true;
-          if (moveKey !== lastMoveKey || now - lastMoveSentAt >= 250) {
+          const valueChanged = moveKey !== lastMoveKey;
+          const sendInterval = valueChanged
+            ? MOVE_SEND_INTERVAL_MS
+            : MOVE_HEARTBEAT_INTERVAL_MS;
+          if (now - lastMoveSentAt >= sendInterval) {
             lastMoveKey = moveKey;
             lastMoveSentAt = now;
             onMoveRef.current(command, { throttle, steering });
@@ -201,13 +203,19 @@ export default function useGamepadControl({
         cameraToggleWasPressed = cameraTogglePressed;
         cameraResetButtonWasPressed = cameraResetButtonPressed;
         stopButtonWasPressed = stopButtonPressed;
-      } else if (hadActiveInput) {
-        hadActiveInput = false;
-        lastMoveKey = "STOP:0:0";
-        lastMoveSentAt = 0;
+      } else {
         updateActionPress("HORN", false);
         updateActionPress("CAM_RESET", false);
-        onMoveRef.current("STOP", { throttle: 0, steering: 0 });
+        lightButtonWasPressed = false;
+        cameraToggleWasPressed = false;
+        cameraResetButtonWasPressed = false;
+        stopButtonWasPressed = false;
+        if (hadActiveInput) {
+          hadActiveInput = false;
+          lastMoveKey = "STOP:0:0";
+          lastMoveSentAt = 0;
+          onMoveRef.current("STOP", { throttle: 0, steering: 0 });
+        }
       }
 
       rafId = requestAnimationFrame(loop);
