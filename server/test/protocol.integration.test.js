@@ -1265,3 +1265,69 @@ test("control/action rate limiting returns errors when exceeded", async () => {
     controller.close();
   }
 });
+
+test("controller commands and device logs use their dedicated limits", async () => {
+  const port = getFreePort();
+  const child = spawn(process.execPath, ["index.js"], {
+    cwd: path.resolve(__dirname, ".."),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      VEHICLE_AUTH_TOKEN: "",
+      CONTROLLER_AUTH_TOKEN: "",
+      ALLOW_LOCALHOST_AUTH_BYPASS: "true",
+      RATE_LIMIT_MAX_MESSAGES: "10",
+      DEVICE_RATE_LIMIT_MAX_MESSAGES: "20",
+      CONTROL_ACTION_RATE_LIMIT_MAX_MESSAGES: "5",
+    },
+    stdio: "ignore",
+  });
+  let esp;
+  let controller;
+
+  try {
+    const url = `ws://127.0.0.1:${port}`;
+    await waitForServer(url, SERVER_START_TIMEOUT_MS);
+    const vehicleId = `test-control-limit-${Date.now()}`;
+    esp = await connectClient(url);
+    controller = await connectClient(url);
+    sendJson(esp, { type: "identify", clientType: "esp", vehicleId });
+    await waitForMessage(esp, (msg) => msg.type === "ack");
+    sendJson(controller, { type: "identify", clientType: "web-controller", vehicleId });
+    await waitForMessage(controller, (msg) => msg.type === "ack");
+
+    const received = [];
+    controller.on("message", (raw, isBinary) => {
+      if (!isBinary) received.push(JSON.parse(raw.toString()));
+    });
+    for (let i = 0; i < 9; i += 1) {
+      sendJson(controller, { type: "ping", timestamp: Date.now() });
+    }
+    for (let i = 0; i < 3; i += 1) {
+      sendJson(controller, {
+        type: "control",
+        vehicleId,
+        source: "keyboard",
+        command: "STOP",
+        payload: { throttle: 0, steering: 0 },
+        timestamp: Date.now(),
+        commandId: `ctl-dedicated-${i}`,
+      });
+    }
+    for (let i = 0; i < 12; i += 1) {
+      sendJson(esp, { type: "device_log", source: "esp32", level: "info", message: `log-${i}` });
+    }
+    const deadline = Date.now() + MESSAGE_TIMEOUT_MS;
+    while ((received.filter((msg) => msg.type === "ack" && msg.commandId?.startsWith("ctl-dedicated-")).length < 3 ||
+      received.filter((msg) => msg.type === "device_log").length < 12) && Date.now() < deadline) {
+      await delay(20);
+    }
+    assert.equal(received.filter((msg) => msg.type === "ack" && msg.commandId?.startsWith("ctl-dedicated-")).length, 3);
+    assert.equal(received.filter((msg) => msg.type === "device_log").length, 12);
+    assert.equal(received.filter((msg) => msg.type === "error" && /rate limit/i.test(msg.message)).length, 0);
+  } finally {
+    esp?.close();
+    controller?.close();
+    child.kill();
+  }
+});
