@@ -191,22 +191,24 @@ test("identify flow registers controller and returns initial status", async () =
   const ws = await connectClient(`ws://127.0.0.1:${serverPort}`);
 
   try {
+    const ackMessage = waitForMessage(
+      ws,
+      (msg) => msg.type === "ack" && /Controller registered/.test(msg.message)
+    );
+    const statusMessage = waitForMessage(
+      ws,
+      (msg) => msg.type === "status" && msg.vehicleId === vehicleId
+    );
     sendJson(ws, {
       type: "identify",
       clientType: "web-controller",
       vehicleId,
     });
 
-    const ack = await waitForMessage(
-      ws,
-      (msg) => msg.type === "ack" && /Controller registered/.test(msg.message)
-    );
+    const ack = await ackMessage;
     assert.equal(ack.type, "ack");
 
-    const status = await waitForMessage(
-      ws,
-      (msg) => msg.type === "status" && msg.vehicleId === vehicleId
-    );
+    const status = await statusMessage;
     assert.equal(status.state, "offline");
     assert.match(status.message, /ESP not connected|ESP available/);
   } finally {
@@ -655,6 +657,10 @@ test("camera stream profile reaches esp-cam without the vehicle ESP", async () =
       (msg) => msg.type === "camera_stream_profile"
     );
     const commandId = `profile-${Date.now()}`;
+    const ack = waitForMessage(
+      controller,
+      (msg) => msg.type === "ack" && msg.commandId === commandId
+    );
     sendJson(controller, {
       type: "action",
       vehicleId,
@@ -666,11 +672,7 @@ test("camera stream profile reaches esp-cam without the vehicle ESP", async () =
     });
 
     assert.equal((await profileMessage).profile, "realtime");
-    const ack = await waitForMessage(
-      controller,
-      (msg) => msg.type === "ack" && msg.commandId === commandId
-    );
-    assert.match(ack.message, /realtime/);
+    assert.match((await ack).message, /realtime/);
   } finally {
     camera.close();
     controller.close();
