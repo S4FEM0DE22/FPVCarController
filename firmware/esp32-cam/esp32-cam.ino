@@ -57,6 +57,7 @@ bool cameraReady = false;
 bool cameraHasPsram = false;
 bool flashOn = false;
 bool wsConnected = false;
+bool deviceLogsEnabled = false;
 bool webSocketStarted = false;
 bool runtimeServicesStarted = false;
 bool cloudMotionMode = false;
@@ -638,7 +639,7 @@ void sendIdentify() {
 }
 
 void sendDeviceLog(const char *level, const String &message) {
-  if (!wsConnected) return;
+  if (!wsConnected || !deviceLogsEnabled) return;
 
   JsonDocument doc;
   doc["type"] = "device_log";
@@ -1475,6 +1476,7 @@ void sendCloudFrame() {
 void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   if (type == WStype_CONNECTED) {
     wsConnected = true;
+    deviceLogsEnabled = false;
     lastCloudFrameSentAt = 0;
     cloudFrameSequence = 0;
     clearPendingCloudFrameAcks();
@@ -1494,6 +1496,7 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 
   if (type == WStype_DISCONNECTED) {
     wsConnected = false;
+    deviceLogsEnabled = false;
     clearPendingCloudFrameAcks();
     return;
   }
@@ -1504,6 +1507,10 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
     if (error) return;
 
     const char *messageType = doc["type"] | "";
+    if (strcmp(messageType, "log_config") == 0) {
+      deviceLogsEnabled = doc["enabled"] | false;
+      return;
+    }
     if (strcmp(messageType, "camera_frame_ack") == 0) {
       const uint32_t ackFrameId = doc["frameId"] | 0;
       unsigned long frameRoundTripMs = 0;

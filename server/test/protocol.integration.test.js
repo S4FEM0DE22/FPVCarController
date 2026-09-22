@@ -229,13 +229,16 @@ test("device logs from both boards use receipt time and replay oldest first", as
       sendJson(ws, { type: "identify", clientType, vehicleId });
       await ack;
     }
+    const enabled = waitForMessage(controller, msg => msg.type === "log_config" && msg.enabled === true);
+    sendJson(controller, { type: "log_config", vehicleId, enabled: true });
+    await enabled;
     const started = Date.now();
     for (const [ws, source] of [[esp, "esp32"], [cam, "esp32-cam"]]) {
       const received = waitForMessage(controller, msg => msg.type === "device_log");
       sendJson(ws, { type: "device_log", source, level: "info", message: source, timestamp: 1234 });
       const log = await received;
       assert.equal(log.source, source);
-      assert.ok(log.timestamp >= started && log.timestamp <= Date.now());
+      assert.ok(log.timestamp >= started && log.timestamp <= Date.now(), `timestamp=${log.timestamp} started=${started} now=${Date.now()}`);
     }
     reconnect = await connectClient(url);
     const replay = [];
@@ -1268,6 +1271,62 @@ test("control/action rate limiting returns errors when exceeded", async () => {
   }
 });
 
+test("device log switch defaults off, reaches both boards, and survives reconnect", async () => {
+  const vehicleId = `test-log-switch-${Date.now()}`;
+  const url = `ws://127.0.0.1:${serverPort}`;
+  const controller = await connectClient(url);
+  const esp = await connectClient(url);
+  const cam = await connectClient(url);
+  let reconnectedCam;
+  const received = [];
+  controller.on("message", (raw, isBinary) => {
+    if (!isBinary) received.push(JSON.parse(raw.toString()));
+  });
+
+  try {
+    for (const [ws, clientType] of [[controller, "web-controller"], [esp, "esp"], [cam, "esp-cam"]]) {
+      const config = waitForMessage(ws, msg => msg.type === "log_config");
+      sendJson(ws, { type: "identify", clientType, vehicleId });
+      assert.equal((await config).enabled, false);
+    }
+
+    sendJson(esp, { type: "device_log", message: "suppressed" });
+    await delay(80);
+    assert.equal(received.some(msg => msg.type === "device_log"), false);
+
+    const espEnabled = waitForMessage(esp, msg => msg.type === "log_config" && msg.enabled);
+    const camEnabled = waitForMessage(cam, msg => msg.type === "log_config" && msg.enabled);
+    const controllerEnabled = waitForMessage(controller, msg => msg.type === "log_config" && msg.enabled);
+    sendJson(controller, { type: "log_config", vehicleId, enabled: true });
+    await Promise.all([espEnabled, camEnabled, controllerEnabled]);
+
+    const denied = waitForMessage(cam, msg => msg.type === "error" && /Only controllers/.test(msg.message));
+    sendJson(cam, { type: "log_config", vehicleId, enabled: false });
+    await denied;
+
+    const forwarded = waitForMessage(controller, msg => msg.type === "device_log" && msg.message === "visible");
+    sendJson(cam, { type: "device_log", message: "visible" });
+    await forwarded;
+
+    const disabled = waitForMessage(controller, msg => msg.type === "log_config" && !msg.enabled);
+    sendJson(controller, { type: "log_config", vehicleId, enabled: false });
+    await disabled;
+
+    reconnectedCam = await connectClient(url);
+    const replay = waitForMessage(reconnectedCam, msg => msg.type === "log_config");
+    sendJson(reconnectedCam, { type: "identify", clientType: "esp-cam", vehicleId });
+    assert.equal((await replay).enabled, false);
+    sendJson(reconnectedCam, { type: "device_log", message: "suppressed again" });
+    await delay(80);
+    assert.equal(received.filter(msg => msg.type === "device_log").length, 1);
+  } finally {
+    controller.close();
+    esp.close();
+    cam.close();
+    reconnectedCam?.close();
+  }
+});
+
 test("controller commands and device logs use their dedicated limits", async () => {
   const port = getFreePort();
   const child = spawn(process.execPath, ["index.js"], {
@@ -1297,12 +1356,15 @@ test("controller commands and device logs use their dedicated limits", async () 
     await waitForMessage(esp, (msg) => msg.type === "ack");
     sendJson(controller, { type: "identify", clientType: "web-controller", vehicleId });
     await waitForMessage(controller, (msg) => msg.type === "ack");
+    const enabled = waitForMessage(controller, (msg) => msg.type === "log_config" && msg.enabled === true);
+    sendJson(controller, { type: "log_config", vehicleId, enabled: true });
+    await enabled;
 
     const received = [];
     controller.on("message", (raw, isBinary) => {
       if (!isBinary) received.push(JSON.parse(raw.toString()));
     });
-    for (let i = 0; i < 9; i += 1) {
+    for (let i = 0; i < 8; i += 1) {
       sendJson(controller, { type: "ping", timestamp: Date.now() });
     }
     for (let i = 0; i < 3; i += 1) {

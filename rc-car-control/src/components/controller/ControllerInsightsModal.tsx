@@ -45,6 +45,8 @@ interface ControllerInsightsModalProps {
   batterySamples: number[];
   wifiSamples: number[];
   deviceLogs: DeviceLogEntry[];
+  deviceLogsEnabled: boolean | null;
+  onChangeDeviceLogsEnabled: (enabled: boolean) => void;
   cameraStreamStatus: CameraStreamStatusMessage | null;
 }
 
@@ -138,6 +140,8 @@ export default function ControllerInsightsModal({
   batterySamples,
   wifiSamples,
   deviceLogs,
+  deviceLogsEnabled,
+  onChangeDeviceLogsEnabled,
   cameraStreamStatus,
 }: ControllerInsightsModalProps) {
   const [tab, setTab] = useState<TabKey>("telemetry");
@@ -435,9 +439,19 @@ export default function ControllerInsightsModal({
                       ESP Log Monitor
                     </p>
                     <p className="mt-1 text-sm text-slate-600">
-                      ล่าสุด {filteredLogs.length} รายการ
+                      {deviceLogsEnabled === null ? "รอ Cloud" : deviceLogsEnabled ? `ล่าสุด ${filteredLogs.length} รายการ` : "ปิดการส่ง Log จากบอร์ด"}
                     </p>
                   </div>
+                  <label className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-emerald-600"
+                      checked={deviceLogsEnabled === true}
+                      disabled={deviceLogsEnabled === null}
+                      onChange={(event) => onChangeDeviceLogsEnabled(event.target.checked)}
+                    />
+                    ส่ง Log รถและกล้อง
+                  </label>
                   <div className="flex flex-wrap gap-2">
                     {(["all", "esp32", "esp32-cam"] as const).map((source) => (
                       <button
