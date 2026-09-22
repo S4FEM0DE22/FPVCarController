@@ -308,7 +308,7 @@ export default function useVehicleSocket(
   const sendRaw = useCallback((payload: OutgoingMessage) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      enqueueOutbound(payload);
+      if (payload.type === "action") enqueueOutbound(payload);
       return false;
     }
 
@@ -316,7 +316,7 @@ export default function useVehicleSocket(
       sendOverSocket(ws, payload);
       return true;
     } catch {
-      enqueueOutbound(payload);
+      if (payload.type === "action") enqueueOutbound(payload);
       return false;
     }
   }, [enqueueOutbound, sendOverSocket]);
@@ -330,6 +330,9 @@ export default function useVehicleSocket(
   }, []);
 
   const connect = useCallback(function connectSocket() {
+    if (!shouldReconnectRef.current) return;
+    const current = wsRef.current;
+    if (current?.readyState === WebSocket.CONNECTING || current?.readyState === WebSocket.OPEN) return;
     clearTimers();
     setConnectionState("CONNECTING");
     setLastError("");
@@ -348,6 +351,7 @@ export default function useVehicleSocket(
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (wsRef.current !== ws) return;
         pendingCameraFrameIdRef.current = null;
         reconnectAttemptRef.current = 0;
         setReconnectAttempts(0);
@@ -363,6 +367,7 @@ export default function useVehicleSocket(
       };
 
       ws.onmessage = (event) => {
+        if (wsRef.current !== ws) return;
         if (event.data instanceof ArrayBuffer) {
           const frameId = pendingCameraFrameIdRef.current;
           pendingCameraFrameIdRef.current = null;
@@ -418,12 +423,15 @@ export default function useVehicleSocket(
       };
 
       ws.onerror = () => {
+        if (wsRef.current !== ws) return;
         setConnectionState("ERROR");
         setLastError("WebSocket error");
         socketLogger.warn("socket error");
       };
 
       ws.onclose = (event) => {
+        if (wsRef.current !== ws) return;
+        wsRef.current = null;
         pendingCameraFrameIdRef.current = null;
         setConnectionState("DISCONNECTED");
         clearTimers();
@@ -468,7 +476,7 @@ export default function useVehicleSocket(
 
     const handleOnline = () => {
       const ws = wsRef.current;
-      if (!ws || ws.readyState !== WebSocket.OPEN) connect();
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) connect();
     };
 
     const handleOffline = () => {

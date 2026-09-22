@@ -29,6 +29,9 @@ const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60000);
 const RATE_LIMIT_MAX_MESSAGES = Number(
   process.env.RATE_LIMIT_MAX_MESSAGES || 240
 );
+const DEVICE_RATE_LIMIT_MAX_MESSAGES = Number(
+  process.env.DEVICE_RATE_LIMIT_MAX_MESSAGES || 1800
+);
 const CONTROL_ACTION_RATE_LIMIT_WINDOW_MS = Number(
   process.env.CONTROL_ACTION_RATE_LIMIT_WINDOW_MS || 5000
 );
@@ -86,7 +89,7 @@ function sanitizeIp(ip) {
   return String(ip).replace(/^::ffff:/, "");
 }
 
-function isRateLimited(ip) {
+function isRateLimited(ip, maxMessages = RATE_LIMIT_MAX_MESSAGES) {
   const key = sanitizeIp(ip);
   const now = Date.now();
   const current = rateLimitByIp.get(key);
@@ -116,7 +119,7 @@ function isRateLimited(ip) {
   current.lastSeen = now;
   current.count += 1;
 
-  if (current.count > RATE_LIMIT_MAX_MESSAGES) {
+  if (current.count > maxMessages) {
     current.blockedUntil = now + RATE_LIMIT_BLOCK_MS;
     return {
       limited: true,
@@ -583,6 +586,7 @@ logger.info({
   port: PORT,
   rateLimitWindowMs: RATE_LIMIT_WINDOW_MS,
   rateLimitMaxMessages: RATE_LIMIT_MAX_MESSAGES,
+  deviceRateLimitMaxMessages: DEVICE_RATE_LIMIT_MAX_MESSAGES,
   rateLimitBlockMs: RATE_LIMIT_BLOCK_MS,
   controlActionRateLimitWindowMs: CONTROL_ACTION_RATE_LIMIT_WINDOW_MS,
   controlActionRateLimitMaxMessages: CONTROL_ACTION_RATE_LIMIT_MAX_MESSAGES,
@@ -776,8 +780,15 @@ wss.on("connection", (ws, request) => {
       return;
     }
 
-    const rate = isRateLimited(connectionId);
-    if (rate.limited) {
+    // Driving commands have their own per-IP/vehicle limiter below.
+    const usesControlLimit =
+      ws.meta.clientType === "web-controller" &&
+      (data.type === "control" || data.type === "action");
+    const isDevice = ws.meta.clientType === "esp" || ws.meta.clientType === "esp-cam";
+    const rate = usesControlLimit
+      ? null
+      : isRateLimited(connectionId, isDevice ? DEVICE_RATE_LIMIT_MAX_MESSAGES : RATE_LIMIT_MAX_MESSAGES);
+    if (rate?.limited) {
       safeSend(ws, {
         type: "error",
         message: `Rate limit exceeded. Retry in ${Math.ceil(

@@ -45,7 +45,7 @@ function closeReasonMessage(event: CloseEvent) {
   return `close(code=${event.code}${reason})`;
 }
 
-export type AckTrackedMessage = Extract<OutgoingMessage, { type: "control" | "action" }>;
+export type AckTrackedMessage = Extract<OutgoingMessage, { type: "action" }>;
 
 export interface PendingAckEntry {
   payload: AckTrackedMessage;
@@ -55,7 +55,7 @@ export interface PendingAckEntry {
 
 function isAckTrackedMessage(payload: OutgoingMessage): payload is AckTrackedMessage {
   return (
-    (payload.type === "control" || payload.type === "action") &&
+    payload.type === "action" &&
     typeof payload.commandId === "string" &&
     payload.commandId.trim().length > 0
   );
