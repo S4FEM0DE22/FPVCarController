@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { clamp } from "@/lib/math";
-import { normalizeDriveInput } from "@/lib/driveInput";
+import { normalizeDriveInput, resolveDriveCommand } from "@/lib/driveInput";
 import type { ActionCommand, ControlCommand } from "@/types/control";
 
 interface GamepadControlProps {
@@ -26,9 +26,22 @@ function findConnectedGamepad() {
 }
 
 const GAMEPAD_DEADZONE = 0.14;
+const GAMEPAD_AXIS_SNAP_RATIO = 0.32;
+const GAMEPAD_AXIS_RELEASE_RATIO = 0.45;
+const GAMEPAD_OUTPUT_STEP = 0.05;
+const GAMEPAD_STEP_HYSTERESIS = 0.01;
 const MOVE_SEND_INTERVAL_MS = 100;
 const MOVE_HEARTBEAT_INTERVAL_MS = 250;
-const MOVE_CHANGE_THRESHOLD = 0.03;
+
+function stabilizeDriveAxis(value: number, previous: number | null) {
+  if (
+    previous !== null &&
+    Math.abs(value - previous) < GAMEPAD_OUTPUT_STEP / 2 + GAMEPAD_STEP_HYSTERESIS
+  ) {
+    return previous;
+  }
+  return Number((Math.round(value / GAMEPAD_OUTPUT_STEP) * GAMEPAD_OUTPUT_STEP).toFixed(2));
+}
 
 function resolveCameraAction(
   rx: number,
@@ -134,9 +147,24 @@ export default function useGamepadControl({
         const ly = clamp(pad.axes[1] || 0, -1, 1);
         const rx = clamp(pad.axes[2] || 0, -1, 1);
         const ry = clamp(pad.axes[3] || 0, -1, 1);
-        const { throttle, steering, command } = normalizeDriveInput(-ly, lx, {
+        const wasHorizontal = lastMove?.command === "LEFT" || lastMove?.command === "RIGHT";
+        const wasVertical = lastMove?.command === "FORWARD" || lastMove?.command === "BACKWARD";
+        const horizontalSnap = Math.abs(lx) > GAMEPAD_DEADZONE &&
+          (Math.abs(ly) < GAMEPAD_DEADZONE ||
+            Math.abs(ly) <= Math.abs(lx) * (wasHorizontal ? GAMEPAD_AXIS_RELEASE_RATIO : GAMEPAD_AXIS_SNAP_RATIO));
+        const verticalSnap = Math.abs(ly) > GAMEPAD_DEADZONE &&
+          (Math.abs(lx) < GAMEPAD_DEADZONE ||
+            Math.abs(lx) <= Math.abs(ly) * (wasVertical ? GAMEPAD_AXIS_RELEASE_RATIO : GAMEPAD_AXIS_SNAP_RATIO));
+        const normalized = normalizeDriveInput(horizontalSnap ? 0 : -ly, verticalSnap ? 0 : lx, {
           deadzone: GAMEPAD_DEADZONE,
         });
+        const throttle = normalized.command === "STOP"
+          ? 0
+          : stabilizeDriveAxis(normalized.throttle, lastMove?.throttle ?? null);
+        const steering = normalized.command === "STOP"
+          ? 0
+          : stabilizeDriveAxis(normalized.steering, lastMove?.steering ?? null);
+        const command = resolveDriveCommand(throttle, steering);
 
         const isActive = throttle !== 0 || steering !== 0;
         const stopButtonPressed = Boolean(pad.buttons[9]?.pressed);
@@ -153,8 +181,7 @@ export default function useGamepadControl({
         if (!stopLatched && isActive) {
           hadActiveInput = true;
           const valueChanged = !lastMove || command !== lastMove.command ||
-            Math.abs(throttle - lastMove.throttle) >= MOVE_CHANGE_THRESHOLD ||
-            Math.abs(steering - lastMove.steering) >= MOVE_CHANGE_THRESHOLD;
+            throttle !== lastMove.throttle || steering !== lastMove.steering;
           const sendInterval = valueChanged
             ? MOVE_SEND_INTERVAL_MS
             : MOVE_HEARTBEAT_INTERVAL_MS;
