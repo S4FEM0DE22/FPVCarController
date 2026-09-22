@@ -69,6 +69,7 @@ const VEHICLE_LIVENESS_TIMEOUT_MS = Number(
 const CAMERA_LIVENESS_CHECK_INTERVAL_MS = Number(
   process.env.CAMERA_LIVENESS_CHECK_INTERVAL_MS || 2000
 );
+const DEVICE_LOG_HISTORY_LIMIT = 20;
 const ALLOW_LOCALHOST_AUTH_BYPASS =
   String(process.env.ALLOW_LOCALHOST_AUTH_BYPASS || "true").toLowerCase() !==
   "false";
@@ -1378,7 +1379,7 @@ wss.on("connection", (ws, request) => {
         timestamp: Date.now(),
       };
 
-      entry.lastDeviceLogs = [deviceLog, ...entry.lastDeviceLogs].slice(0, 80);
+      entry.lastDeviceLogs = [deviceLog, ...entry.lastDeviceLogs].slice(0, DEVICE_LOG_HISTORY_LIMIT);
       broadcastToControllers(vehicleId, deviceLog);
       return;
     }
