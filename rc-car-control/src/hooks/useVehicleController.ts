@@ -111,6 +111,7 @@ export default function useVehicleController() {
   const [cameraStreamStatus, setCameraStreamStatus] =
     useState<CameraStreamStatusMessage | null>(null);
   const [deviceLogs, setDeviceLogs] = useState<DeviceLogEntry[]>([]);
+  const [deviceLogsEnabled, setDeviceLogsEnabled] = useState<boolean | null>(null);
   const [wifiNetworks, setWifiNetworks] = useState<WifiNetwork[]>([]);
   const [wifiScanState, setWifiScanState] = useState<WifiScanState>("idle");
   const [wifiScanError, setWifiScanError] = useState("");
@@ -341,6 +342,11 @@ export default function useVehicleController() {
       ].slice(0, MAX_DEVICE_LOGS));
     }
 
+    if (message.type === "log_config") {
+      setDeviceLogsEnabled(message.enabled);
+      if (!message.enabled) setDeviceLogs([]);
+    }
+
     if (message.type === "wifi_scan_result") {
       if (wifiScanTimeoutRef.current) {
         clearTimeout(wifiScanTimeoutRef.current);
@@ -407,6 +413,7 @@ export default function useVehicleController() {
 
   useEffect(() => {
     if (connectionState !== "CONNECTED") {
+      setDeviceLogsEnabled(null);
       cameraLastSeenAtRef.current = 0;
       setCameraOnline(false);
       setCameraStreamStatus(null);
@@ -433,6 +440,11 @@ export default function useVehicleController() {
 
     return () => window.clearInterval(timer);
   }, [connectionState, clearCameraFrames]);
+
+  const setRemoteDeviceLogsEnabled = useCallback((enabled: boolean) => {
+    if (connectionState !== "CONNECTED") return;
+    sendRaw({ type: "log_config", vehicleId: VEHICLE_CONFIG.id, enabled });
+  }, [connectionState, sendRaw]);
 
   const handleMove = useCallback(
     (
@@ -656,6 +668,8 @@ export default function useVehicleController() {
   return {
     telemetry,
     deviceLogs,
+    deviceLogsEnabled,
+    setRemoteDeviceLogsEnabled,
     wifiNetworks,
     wifiScanState,
     wifiScanError,

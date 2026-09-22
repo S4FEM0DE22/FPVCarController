@@ -282,6 +282,9 @@ function getVehicleEntry(vehicleId) {
       camera: null,
       controllers: new Set(),
       ownerControllerId: null,
+      deviceLogsEnabled: false,
+      lastLoggedControlCommand: null,
+      lastControlLogAt: 0,
       lastTelemetry: null,
       lastStatus: null,
       lastCameraFrame: null,
@@ -860,6 +863,7 @@ wss.on("connection", (ws, request) => {
           type: "ack",
           message: `ESP registered for ${vehicleId}`,
         });
+        safeSend(ws, { type: "log_config", vehicleId, enabled: entry.deviceLogsEnabled });
 
         broadcastToControllers(vehicleId, {
           type: "status",
@@ -886,6 +890,7 @@ wss.on("connection", (ws, request) => {
           type: "ack",
           message: `ESP32-CAM registered for ${vehicleId}`,
         });
+        safeSend(ws, { type: "log_config", vehicleId, enabled: entry.deviceLogsEnabled });
 
         broadcastToControllers(vehicleId, {
           type: "camera_status",
@@ -901,6 +906,7 @@ wss.on("connection", (ws, request) => {
           type: "ack",
           message: `Controller registered for ${vehicleId}`,
         });
+        safeSend(ws, { type: "log_config", vehicleId, enabled: entry.deviceLogsEnabled });
 
         if (entry.lastTelemetry) {
           safeSend(ws, entry.lastTelemetry);
@@ -989,6 +995,24 @@ wss.on("connection", (ws, request) => {
 
     const { clientType, vehicleId } = ws.meta;
     const entry = getVehicleEntry(vehicleId);
+
+    if (data.type === "log_config") {
+      if (clientType !== "web-controller" || typeof data.enabled !== "boolean") {
+        safeSend(ws, { type: "error", message: "Only controllers can set device logging" });
+        return;
+      }
+      if (entry.deviceLogsEnabled !== data.enabled) {
+        entry.deviceLogsEnabled = data.enabled;
+        if (!data.enabled) entry.lastDeviceLogs = [];
+        const config = { type: "log_config", vehicleId, enabled: data.enabled };
+        safeSend(entry.esp, config);
+        safeSend(entry.camera, config);
+        broadcastToControllers(vehicleId, config);
+      } else {
+        safeSend(ws, { type: "log_config", vehicleId, enabled: entry.deviceLogsEnabled });
+      }
+      return;
+    }
 
     // 2) PING/PONG
     if (data.type === "ping") {
@@ -1112,15 +1136,23 @@ wss.on("connection", (ws, request) => {
         message: `control forwarded: ${data.command}`,
       });
 
-      logger.info({
-        event: "control.forwarded",
-        ip,
-        connectionId,
-        vehicleId,
-        clientType,
-        command: data.command,
-        commandId,
-      });
+      const now = Date.now();
+      if (
+        entry.lastLoggedControlCommand !== data.command ||
+        now - entry.lastControlLogAt >= 5000
+      ) {
+        entry.lastLoggedControlCommand = data.command;
+        entry.lastControlLogAt = now;
+        logger.info({
+          event: "control.forwarded",
+          ip,
+          connectionId,
+          vehicleId,
+          clientType,
+          command: data.command,
+          commandId,
+        });
+      }
       return;
     }
 
@@ -1347,6 +1379,7 @@ wss.on("connection", (ws, request) => {
         });
         return;
       }
+      if (!entry.deviceLogsEnabled) return;
 
       const message =
         typeof data.message === "string" ? data.message.trim().slice(0, 240) : "";
@@ -1496,14 +1529,6 @@ wss.on("connection", (ws, request) => {
       };
       entry.lastTelemetry = telemetry;
       broadcastToControllers(vehicleId, telemetry);
-
-      logger.info({
-        event: "telemetry.received",
-        ip,
-        connectionId,
-        vehicleId,
-        clientType,
-      });
       return;
     }
 
@@ -1517,17 +1542,20 @@ wss.on("connection", (ws, request) => {
         return;
       }
 
+      const previousState = entry.lastStatus?.state;
       entry.lastStatus = data;
       broadcastToControllers(vehicleId, data);
 
-      logger.info({
-        event: "status.received",
-        ip,
-        connectionId,
-        vehicleId,
-        clientType,
-        state: data.state,
-      });
+      if (previousState !== data.state) {
+        logger.info({
+          event: "status.received",
+          ip,
+          connectionId,
+          vehicleId,
+          clientType,
+          state: data.state,
+        });
+      }
       return;
     }
 

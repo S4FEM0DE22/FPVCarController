@@ -122,6 +122,7 @@ DriveState drive;
 BehaviorProfile behaviorProfile;
 
 bool wsConnected = false;
+bool deviceLogsEnabled = false;
 bool lightOn = false;
 bool cameraOn = true;
 int panDeg = SERVO_PAN_CENTER;
@@ -652,7 +653,7 @@ bool sendJsonDocument(JsonDocument &doc) {
 }
 
 void sendDeviceLog(const char *level, const String &message) {
-  if (!wsConnected) return;
+  if (!wsConnected || !deviceLogsEnabled) return;
 
   JsonDocument doc;
   doc["type"] = "device_log";
@@ -1172,22 +1173,27 @@ void handleControl(JsonDocument &doc) {
 
   float throttle = payloadNumber(payload, "throttle", 0);
   float steering = payloadNumber(payload, "steering", 0);
-
-  Serial.print("Control received: command=");
-  Serial.print(command);
-  Serial.print(" throttle=");
-  Serial.print(throttle, 3);
-  Serial.print(" steering=");
-  Serial.print(steering, 3);
-  if (strlen(commandId) > 0) {
-    Serial.print(" commandId=");
-    Serial.print(commandId);
+  const unsigned long now = millis();
+  const bool commandChanged = drive.command != command;
+  static unsigned long lastControlLogAt = 0;
+  if (commandChanged || lastControlLogAt == 0 || now - lastControlLogAt >= 5000) {
+    lastControlLogAt = now;
+    Serial.print("Control received: command=");
+    Serial.print(command);
+    Serial.print(" throttle=");
+    Serial.print(throttle, 3);
+    Serial.print(" steering=");
+    Serial.print(steering, 3);
+    if (strlen(commandId) > 0) {
+      Serial.print(" commandId=");
+      Serial.print(commandId);
+    }
+    Serial.println();
+    sendDeviceLog(
+        "info",
+        String("Control ") + command + " throttle=" + String(throttle, 2) +
+            " steering=" + String(steering, 2));
   }
-  Serial.println();
-  sendDeviceLog(
-      "info",
-      String("Control ") + command + " throttle=" + String(throttle, 2) +
-          " steering=" + String(steering, 2));
 
   float scaledThrottle =
       copysign(pow(fabs(throttle), behaviorProfile.throttleExponent), throttle) *
@@ -1197,10 +1203,10 @@ void handleControl(JsonDocument &doc) {
   drive.command = command;
   drive.throttle = clampFloat(scaledThrottle, -1, 1);
   drive.steering = clampFloat(scaledSteering, -1, 1);
-  lastCommandAt = millis();
+  lastCommandAt = now;
   applyDrive(drive.throttle, drive.steering);
   ackCommand(commandId, "control applied by ESP32");
-  sendStatus("control applied by ESP32");
+  if (commandChanged) sendStatus("control applied by ESP32");
 }
 
 void applyBehaviorProfile(JsonObject payload) {
@@ -1370,6 +1376,7 @@ void handleAction(JsonDocument &doc) {
 void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   if (type == WStype_CONNECTED) {
     wsConnected = true;
+    deviceLogsEnabled = false;
     lastWsDisconnectedLogAt = 0;
     Serial.print("WebSocket connected: ");
     Serial.print(config.wsScheme);
@@ -1397,6 +1404,7 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 
   if (type == WStype_DISCONNECTED) {
     wsConnected = false;
+    deviceLogsEnabled = false;
     stopDrive();
     unsigned long now = millis();
     if (lastWsDisconnectedLogAt == 0 || now - lastWsDisconnectedLogAt > 5000) {
@@ -1441,7 +1449,9 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   }
 
   const char *messageType = doc["type"] | "";
-  if (strcmp(messageType, "control") == 0) {
+  if (strcmp(messageType, "log_config") == 0) {
+    deviceLogsEnabled = doc["enabled"] | false;
+  } else if (strcmp(messageType, "control") == 0) {
     handleControl(doc);
   } else if (strcmp(messageType, "action") == 0) {
     handleAction(doc);

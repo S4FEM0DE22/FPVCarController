@@ -120,6 +120,12 @@ export interface DeviceLogMessage {
   timestamp: number;
 }
 
+export interface LogConfigMessage {
+  type: "log_config";
+  vehicleId: string;
+  enabled: boolean;
+}
+
 export interface WifiNetwork {
   ssid: string;
   rssi: number;
@@ -176,7 +182,8 @@ export type OutgoingMessage =
   | ActionMessage
   | IdentifyMessage
   | PingMessage
-  | CameraFrameRenderedMessage;
+  | CameraFrameRenderedMessage
+  | LogConfigMessage;
 
 export type IncomingMessage =
   | TelemetryMessage
@@ -185,6 +192,7 @@ export type IncomingMessage =
   | CameraStatusMessage
   | CameraStreamStatusMessage
   | DeviceLogMessage
+  | LogConfigMessage
   | WifiScanResultMessage
   | WifiUpdateStatusMessage
   | StatusMessage
