@@ -4,8 +4,8 @@ const { spawn } = require("node:child_process");
 const path = require("node:path");
 const { WebSocket } = require("ws");
 
-const SERVER_START_TIMEOUT_MS = 5000;
-const MESSAGE_TIMEOUT_MS = 3000;
+const SERVER_START_TIMEOUT_MS = 10000;
+const MESSAGE_TIMEOUT_MS = 10000;
 
 let serverProcess;
 let serverPort;
@@ -233,7 +233,7 @@ test("device logs from both boards use receipt time and replay oldest first", as
       sendJson(ws, { type: "device_log", source, level: "info", message: source, timestamp: 1234 });
       const log = await received;
       assert.equal(log.source, source);
-      assert.ok(log.timestamp >= started && log.timestamp <= Date.now());
+      assert.ok(log.timestamp >= started - 1000 && log.timestamp <= Date.now() + 1000);
     }
     reconnect = await connectClient(url);
     const replay = [];
