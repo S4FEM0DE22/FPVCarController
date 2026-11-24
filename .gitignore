@@ -1,6 +1,10 @@
 # Dependencies
 node_modules/
 **/node_modules/
+venv/
+.venv/
+env/
+ENV/
 
 # Build outputs
 .next/
