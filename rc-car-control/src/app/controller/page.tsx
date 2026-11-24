@@ -76,6 +76,8 @@ export default function ControllerPage() {
     cameraOnline,
     cameraStreamStatus,
     deviceLogs,
+    deviceLogsEnabled,
+    setRemoteDeviceLogsEnabled,
     wifiNetworks,
     wifiScanState,
     wifiScanError,
@@ -496,6 +498,8 @@ export default function ControllerPage() {
         batterySamples={batterySamples}
         wifiSamples={wifiSamples}
         deviceLogs={deviceLogs}
+        deviceLogsEnabled={deviceLogsEnabled}
+        onChangeDeviceLogsEnabled={setRemoteDeviceLogsEnabled}
         cameraStreamStatus={cameraStreamStatus}
       />
 

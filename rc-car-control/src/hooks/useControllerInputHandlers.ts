@@ -40,7 +40,6 @@ export default function useControllerInputHandlers({
   handleGamepadAction,
 }: UseControllerInputHandlersOptions) {
   const lastTouchActionAtRef = useRef(0);
-  const lastGamepadActionAtRef = useRef(0);
 
   const handleTouchMoveWithTuning = useCallback(
     (command: ControlCommand, payload?: Record<string, unknown>) => {
@@ -128,9 +127,6 @@ export default function useControllerInputHandlers({
   const handleGamepadActionWithWatchdog = useCallback(
     (action: ActionCommand, payload?: Record<string, unknown>) => {
       onUserInput();
-      if (!shouldSendTimed(lastGamepadActionAtRef, ACTION_SEND_INTERVAL_MS)) {
-        return;
-      }
       handleGamepadAction(action, payload);
     },
     [handleGamepadAction, onUserInput]
