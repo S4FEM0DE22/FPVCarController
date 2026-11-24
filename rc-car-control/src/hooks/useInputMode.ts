@@ -8,6 +8,21 @@ function hasConnectedGamepad() {
   return Array.from(navigator.getGamepads()).some((pad) => pad?.connected);
 }
 
+function hasActiveGamepadInput() {
+  if (typeof navigator === "undefined" || !navigator.getGamepads) return false;
+  return Array.from(navigator.getGamepads()).some((pad) =>
+    pad?.connected && (
+      pad.buttons.some((button) => button.pressed) ||
+      Math.abs(pad.axes[0] || 0) > 0.18 ||
+      Math.abs(pad.axes[1] || 0) > 0.18 ||
+      (pad.mapping === "standard" && (
+        Math.abs(pad.axes[2] || 0) > 0.35 ||
+        Math.abs(pad.axes[3] || 0) > 0.35
+      ))
+    )
+  );
+}
+
 export default function useInputMode(isMobile: boolean) {
   const [manualInputMode, setManualInputMode] = useState<InputMode | null>(() =>
     hasConnectedGamepad() ? "gamepad" : null
@@ -35,10 +50,12 @@ export default function useInputMode(isMobile: boolean) {
     };
 
     const gamepadPoll = window.setInterval(() => {
-      if (hasConnectedGamepad()) {
-        setManualInputMode((current) => current ?? "gamepad");
+      if (!hasConnectedGamepad()) {
+        setManualInputMode((current) => current === "gamepad" ? null : current);
+      } else if (hasActiveGamepadInput()) {
+        setManualInputMode("gamepad");
       }
-    }, 1000);
+    }, 100);
 
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("pointerdown", onPointerDown);
